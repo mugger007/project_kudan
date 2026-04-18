@@ -1,0 +1,16 @@
+[Unit]
+Description=Kudan Polymarket Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/opt/Kudan
+EnvironmentFile=/opt/Kudan/.env
+ExecStart=/usr/bin/python3 /opt/Kudan/main.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
