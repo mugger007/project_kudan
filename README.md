@@ -4,7 +4,7 @@ Kudan is the guardian of hidden probabilities and forger of risk-free edges in t
 
 This repository is a production-ready starter for a free-tier, always-on Polymarket bot focused on:
 
-- High-Probability entries: event-driven tweet and crypto candidate workflow with bucket-aware checks.
+- High-Probability entries: event-driven tweet candidate workflow with bucket-aware checks.
 
 The stack is now optimized for ClawCloud Run deployment through App Launchpad using a container image.
 
@@ -86,14 +86,14 @@ The stack is now optimized for ClawCloud Run deployment through App Launchpad us
 
 Detailed guide: see clawcloud-deployment.md.
 
-## High-Probability Tweet and Crypto Workflow
+## High-Probability Tweet Workflow
 
 Kudan now uses a single high-probability strategy pipeline:
 
 1. Periodic event discovery every 5-15 minutes from Gamma /events/keyset with cursor paging.
-2. Parallel relevance filters:
-   - Tweet markets: tag_id=97 plus Elon tweet series matching.
-   - Crypto markets: BTC/ETH/SOL and range-oriented title/ticker filters.
+2. Tweet relevance filter from the start:
+   - Fetch only tweet-tagged events with `tag_id=972`.
+   - Keep Elon tweet series events using title/ticker checks.
 3. Bucket classification and prefiltering into 5min/hourly/daily/weekly/monthly.
 4. Candidate snapshot caching into SQLite candidate_events table.
 5. Per-bucket scanners refresh each event, enforce 99% checks, apply tweet boundary safety, then select one BestMarket and execute.
