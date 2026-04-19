@@ -111,7 +111,7 @@ class ClobAuthManager:
             return self._sdk_client.create_or_derive_api_creds()
 
         last_error: Exception | None = None
-        for attempt in range(1, 4):
+        for attempt in range(1, 6):
             try:
                 derived = await asyncio.to_thread(_derive)
                 self._creds = ClobApiCredentials.from_any(derived)
@@ -119,9 +119,9 @@ class ClobAuthManager:
                 return self._creds
             except Exception as exc:
                 last_error = exc
-                backoff = min(2 ** attempt, 8)
+                backoff = min(2 ** attempt, 30)
                 self.logger.warning(
-                    "CLOB auth derive attempt %s/3 failed: %s (retry in %ss)",
+                    "CLOB auth derive attempt %s/5 failed: %s (retry in %ss)",
                     attempt,
                     exc,
                     backoff,

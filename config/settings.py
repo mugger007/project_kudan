@@ -43,6 +43,8 @@ class AppSettings:
     openvpn_config_file: str
     openvpn_executable: str
     openvpn_auth_file: str
+    openvpn_username: str
+    openvpn_password: str
 
 
 def _parse_bool(value: str | None, default: bool = False) -> bool:
@@ -99,4 +101,6 @@ def load_settings(extra_env_files: Sequence[str] | None = None) -> AppSettings:
         openvpn_config_file=os.getenv("OPENVPN_CONFIG_FILE", "").strip(),
         openvpn_executable=os.getenv("OPENVPN_EXECUTABLE", "openvpn").strip(),
         openvpn_auth_file=os.getenv("OPENVPN_AUTH_FILE", "").strip(),
+        openvpn_username=os.getenv("OPENVPN_USERNAME", "").strip(),
+        openvpn_password=os.getenv("OPENVPN_PASSWORD", "").strip(),
     )

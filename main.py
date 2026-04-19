@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import os
 import signal
+import socket
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -87,6 +88,35 @@ async def ensure_rpc_health(settings: AppSettings, rpc_rotator: RpcRotator, logg
             rpc_rotator.next()
 
     health.rpc_ok = False
+
+
+async def wait_for_http_endpoint(
+    session: aiohttp.ClientSession,
+    url: str,
+    logger,
+    *,
+    name: str,
+    attempts: int = 6,
+    base_delay: float = 2.0,
+) -> None:
+    """Waits until an HTTP endpoint responds so startup does not race VPN route changes."""
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status < 500:
+                    logger.info("%s endpoint is reachable (%s)", name, resp.status)
+                    return
+                last_error = RuntimeError(f"{name} returned HTTP {resp.status}")
+        except Exception as exc:
+            last_error = exc
+
+        if attempt < attempts:
+            delay = base_delay * (2 ** (attempt - 1))
+            logger.warning("Waiting for %s endpoint (%s/%s): %s; retry in %ss", name, attempt, attempts, last_error, delay)
+            await asyncio.sleep(delay)
+
+    raise RuntimeError(f"{name} endpoint remained unreachable after {attempts} attempts: {last_error}")
 
 
 async def looping_task(
@@ -175,6 +205,8 @@ async def main() -> None:
         reconnect_seconds=settings.vpn_reconnect_seconds,
         openvpn_executable=settings.openvpn_executable,
         auth_file=settings.openvpn_auth_file,
+        username=settings.openvpn_username,
+        password=settings.openvpn_password,
     )
     strategy = HighProbabilityStrategy(probability_threshold=settings.high_prob_threshold)
 
@@ -198,7 +230,25 @@ async def main() -> None:
 
     health_app = build_health_app(health, dashboard)
 
-    async with aiohttp.ClientSession(headers={"User-Agent": "Kudan/0.1"}) as session:
+    if settings.vpn_enabled:
+        try:
+            await vpn.ensure_connected(logger)
+            await asyncio.sleep(10)
+            health.vpn_ok = True
+        except Exception as exc:
+            health.vpn_ok = False
+            logger.exception("Initial VPN connection failed: %s", exc)
+            raise
+
+    connector = aiohttp.TCPConnector(
+        family=socket.AF_INET,
+        ttl_dns_cache=30,
+        enable_cleanup_closed=True,
+    )
+    async with aiohttp.ClientSession(headers={"User-Agent": "Kudan/0.1"}, connector=connector) as session:
+        await wait_for_http_endpoint(session, f"{settings.gamma_base_url.rstrip('/')}/", logger, name="Gamma")
+        await wait_for_http_endpoint(session, f"{settings.clob_base_url.rstrip('/')}/", logger, name="CLOB")
+
         shared_limiters = RateLimiterRegistry()
         gamma = GammaClient(settings.gamma_base_url, session, logger, rate_limiter_registry=shared_limiters)
         clob = ClobClient(
@@ -354,6 +404,8 @@ async def main() -> None:
 
 if __name__ == "__main__":
     try:
+        if os.name == "nt" and hasattr(asyncio, "WindowsSelectorEventLoopPolicy"):
+            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
         asyncio.run(main())
     except (KeyboardInterrupt, asyncio.CancelledError):
         pass
