@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import json
 from typing import Any
 
 import aiohttp
@@ -22,6 +21,7 @@ def build_health_app(
     opportunities_queue: asyncio.PriorityQueue[tuple[float, dict[str, Any]]],
     scheduler_state: dict[str, Any] | None = None,
 ) -> FastAPI:
+    """Builds the health API app exposing scheduler and runtime status."""
     app = FastAPI(title="Kudan Health", version="1.0.0")
 
     @app.get("/health")
@@ -58,6 +58,7 @@ async def wait_for_http_endpoint(
     attempts: int = 6,
     base_delay: float = 2.0,
 ) -> None:
+    """Waits until an HTTP endpoint responds with a non-5xx status."""
     last_error: Exception | None = None
     for attempt in range(1, attempts + 1):
         try:
@@ -85,6 +86,7 @@ async def wait_for_http_endpoint(
 
 
 async def serve_health_api(app: FastAPI, host: str, port: int, logger, stop_event: asyncio.Event) -> None:
+    """Runs an in-process uvicorn health server until stop event is set."""
     config = uvicorn.Config(app, host=host, port=port, log_level="warning", lifespan="off")
     server = uvicorn.Server(config)
     server.install_signal_handlers = lambda: None
@@ -97,28 +99,15 @@ async def serve_health_api(app: FastAPI, host: str, port: int, logger, stop_even
         await task
 
 
-def extract_token_ids(market: dict[str, Any]) -> tuple[str, str] | None:
-    raw = market.get("clobTokenIds")
-    if isinstance(raw, list) and len(raw) >= 2:
-        return str(raw[0]), str(raw[1])
-    if isinstance(raw, str) and raw:
-        try:
-            parsed = json.loads(raw)
-            if isinstance(parsed, list) and len(parsed) >= 2:
-                return str(parsed[0]), str(parsed[1])
-        except json.JSONDecodeError:
-            return None
-    return None
-
-
 def candidate_row(candidate: CandidateEvent) -> dict[str, Any]:
+    """Converts a CandidateEvent dataclass into a DB-ready dict row."""
     return {
         "event_id": candidate.event_id,
         "title": candidate.title,
         "endDate": candidate.endDate,
         "tweetCount": candidate.tweetCount,
-        "event_type": "tweet",
-        "current_price": None,
+        "event_type": candidate.event_type,
+        "current_price": candidate.current_price,
         "bucket": candidate.bucket,
         "raw_data": candidate.raw_data,
     }
@@ -129,6 +118,7 @@ async def persist_candidate_snapshot(
     candidate_events: dict[str, dict[str, Any]],
     logger,
 ) -> None:
+    """Persists current in-memory candidates into SQLite for recovery."""
     rows = list(candidate_events.values())
     await store.replace_candidate_events(rows)
     logger.debug("Candidate snapshot persisted: %s events", len(rows))
@@ -138,6 +128,7 @@ async def load_candidate_snapshot(
     store: SqliteStore,
     buckets: dict[str, int],
 ) -> dict[str, dict[str, Any]]:
+    """Loads persisted candidates from SQLite into in-memory cache by bucket."""
     restored: dict[str, dict[str, Any]] = {}
     for bucket in buckets:
         rows = await store.list_candidate_events(bucket)

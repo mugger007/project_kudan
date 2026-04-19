@@ -21,11 +21,6 @@ TWEET_MONTHLY_SPAN_PATTERN = re.compile(
 )
 
 
-def tweet_discovery_params() -> dict[str, str]:
-    """Returns request params for tweet-event-only discovery."""
-    return {"tag_id": TWEET_TAG_ID}
-
-
 def is_elon_tweet_event(event: dict[str, Any]) -> bool:
     """Checks whether an event belongs to the Elon tweet event series."""
     try:

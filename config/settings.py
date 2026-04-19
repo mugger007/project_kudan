@@ -38,6 +38,24 @@ class AppSettings:
     max_slippage_pct: float
     high_prob_threshold: float
 
+    bankroll_usd: float
+
+    discovery_poll_seconds: int
+    bucket_5min_seconds: int
+    bucket_15min_seconds: int
+    bucket_1hour_seconds: int
+    bucket_4hour_seconds: int
+    bucket_daily_seconds: int
+    bucket_weekly_seconds: int
+    bucket_monthly_seconds: int
+
+    queue_backpressure_threshold: int
+    queue_backpressure_sleep_seconds: int
+
+    circuit_breaker_threshold: int
+    circuit_breaker_window_seconds: float
+    circuit_breaker_open_seconds: float
+
 
 def _parse_bool(value: str | None, default: bool = False) -> bool:
     """Parses a loose boolean string while supporting common truthy values."""
@@ -57,7 +75,7 @@ def _required(name: str) -> str:
     """Returns a required env var and raises a clear error when missing."""
     value = os.getenv(name, "").strip()
     if not value:
-        raise ValueError(f"Missing required environment variable: {name}")
+        raise ValueError(f"Missing required environment variable: {name}"           )
     return value
 
 
@@ -88,4 +106,18 @@ def load_settings(extra_env_files: Sequence[str] | None = None) -> AppSettings:
         min_liquidity_usd=float(os.getenv("MIN_LIQUIDITY_USD", "200.0")),
         max_slippage_pct=float(os.getenv("MAX_SLIPPAGE_PCT", "0.0075")),
         high_prob_threshold=float(os.getenv("HIGH_PROB_THRESHOLD", "0.99")),
+        bankroll_usd=float(os.getenv("BANKROLL_USD", "10000.0")),
+        discovery_poll_seconds=int(os.getenv("DISCOVERY_POLL_SECONDS", "300")),
+        bucket_5min_seconds=int(os.getenv("BUCKET_5MIN_SECONDS", "18")),
+        bucket_15min_seconds=int(os.getenv("BUCKET_15MIN_SECONDS", "25")),
+        bucket_1hour_seconds=int(os.getenv("BUCKET_1HOUR_SECONDS", "50")),
+        bucket_4hour_seconds=int(os.getenv("BUCKET_4HOUR_SECONDS", "240")),
+        bucket_daily_seconds=int(os.getenv("BUCKET_DAILY_SECONDS", "60")),
+        bucket_weekly_seconds=int(os.getenv("BUCKET_WEEKLY_SECONDS", "300")),
+        bucket_monthly_seconds=int(os.getenv("BUCKET_MONTHLY_SECONDS", "600")),
+        queue_backpressure_threshold=int(os.getenv("QUEUE_BACKPRESSURE_THRESHOLD", "5")),
+        queue_backpressure_sleep_seconds=int(os.getenv("QUEUE_BACKPRESSURE_SLEEP_SECONDS", "10")),
+        circuit_breaker_threshold=int(os.getenv("CIRCUIT_BREAKER_THRESHOLD", "3")),
+        circuit_breaker_window_seconds=float(os.getenv("CIRCUIT_BREAKER_WINDOW_SECONDS", "60")),
+        circuit_breaker_open_seconds=float(os.getenv("CIRCUIT_BREAKER_OPEN_SECONDS", "60")),
     )

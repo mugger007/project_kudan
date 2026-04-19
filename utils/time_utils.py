@@ -14,6 +14,15 @@ def parse_iso_utc(value: str | None) -> datetime | None:
         return None
 
 
+def is_event_not_expired(event: dict[str, Any], now_utc: datetime | None = None) -> bool:
+    """Returns True when an event has no endDate or resolves at/after the current UTC time."""
+    end_ts = parse_iso_utc(str(event.get("endDate") or ""))
+    if end_ts is None:
+        return True
+    current_utc = now_utc or datetime.now(timezone.utc)
+    return end_ts >= current_utc
+
+
 def minutes_remaining_for_event(event: dict[str, Any]) -> float:
     """Computes minutes to event endDate; large default when unavailable."""
     end_ts = parse_iso_utc(str(event.get("endDate") or ""))

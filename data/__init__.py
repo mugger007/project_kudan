@@ -6,7 +6,6 @@ from .rules.crypto_rules import (
     CRYPTO_PRICES_TAG_ID,
     classify_crypto_bucket,
     crypto_bucket_time_match,
-    crypto_discovery_params,
     crypto_safety_check_live_price,
     crypto_safety_check,
     fetch_binance_btc_price,
@@ -17,7 +16,6 @@ from .rules.tweet_rules import (
     classify_tweet_bucket,
     is_elon_tweet_event,
     tweet_bucket_time_match,
-    tweet_discovery_params,
     tweet_safety_check,
 )
 from .auth import ClobApiCredentials, ClobAuthManager
@@ -31,7 +29,6 @@ __all__ = [
     "CandidateEvent",
     "BITCOIN_TAG_ID",
     "CRYPTO_PRICES_TAG_ID",
-    "crypto_discovery_params",
     "is_crypto_event",
     "classify_crypto_bucket",
     "crypto_bucket_time_match",
@@ -39,7 +36,6 @@ __all__ = [
     "crypto_safety_check",
     "crypto_safety_check_live_price",
     "TWEET_TAG_ID",
-    "tweet_discovery_params",
     "is_elon_tweet_event",
     "classify_tweet_bucket",
     "tweet_bucket_time_match",

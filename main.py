@@ -10,25 +10,21 @@ from typing import Any
 import aiohttp
 
 from config import load_settings
-from data import ClobClient, EventFetcher, GammaClient
+from data import CandidateEvent, ClobClient, EventFetcher, GammaClient
 from data.auth import ClobAuthError
 from data.rate_limits import RateLimiterRegistry
 from data.rules.crypto_rules import (
     fetch_binance_btc_price,
-    crypto_safety_check_live_price,
-)
-from data.rules.tweet_rules import (
-    tweet_safety_check,
 )
 from db import SqliteStore
 from execution import TradeExecutor
 from execution.execute_trade import execute_trade
 from monitoring import Dashboard, HealthState, TelegramAlerter, setup_logging
+from strategies import HighProbabilityStrategy
 from utils.risk import RiskManager
 from utils.runtime_helpers import (
     build_health_app,
     candidate_row,
-    extract_token_ids,
     load_candidate_snapshot,
     persist_candidate_snapshot,
     serve_health_api,
@@ -40,21 +36,31 @@ from utils.scheduler_helpers import (
     classify_event_bucket,
     event_type_for_event,
     include_event,
-    load_scheduler_intervals,
     remaining_seconds,
 )
 
 
 async def main() -> None:
+    """Bootstraps runtime services and executes the async 3-stage scheduler."""
     settings = load_settings()
     logger = setup_logging(settings.log_level)
     health = HealthState()
     dashboard = Dashboard()
     stop_event = asyncio.Event()
 
-    discovery_poll_seconds, bucket_intervals = load_scheduler_intervals()
+    discovery_poll_seconds = settings.discovery_poll_seconds
+    bucket_intervals: dict[str, int] = {
+        "5min": settings.bucket_5min_seconds,
+        "15min": settings.bucket_15min_seconds,
+        "hourly": settings.bucket_1hour_seconds,
+        "4hour": settings.bucket_4hour_seconds,
+        "daily": settings.bucket_daily_seconds,
+        "weekly": settings.bucket_weekly_seconds,
+        "monthly": settings.bucket_monthly_seconds,
+    }
 
     def _request_stop(signum: int, _frame: Any) -> None:
+        """Converts OS termination signals into scheduler stop events."""
         logger.warning("Signal %s received. Kudan begins graceful shutdown.", signum)
         stop_event.set()
 
@@ -67,7 +73,7 @@ async def main() -> None:
     await store.init()
 
     risk = RiskManager(
-        bankroll_usd=10_000.0,
+        bankroll_usd=settings.bankroll_usd,
         max_bankroll_exposure_pct=settings.max_bankroll_exposure_pct,
         max_trade_exposure_pct=settings.max_trade_exposure_pct,
         min_liquidity_usd=settings.min_liquidity_usd,
@@ -82,10 +88,17 @@ async def main() -> None:
         store=store,
         alerts=alerts,
     )
+    strategy = HighProbabilityStrategy(probability_threshold=settings.high_prob_threshold)
 
     candidate_events: dict[str, dict[str, Any]] = await load_candidate_snapshot(store, bucket_intervals)
     opportunities_queue: asyncio.PriorityQueue[tuple[float, dict[str, Any]]] = asyncio.PriorityQueue()
-    circuit_breaker = CircuitBreaker(logger, alerts)
+    circuit_breaker = CircuitBreaker(
+        logger,
+        alerts,
+        threshold=settings.circuit_breaker_threshold,
+        window_seconds=settings.circuit_breaker_window_seconds,
+        open_seconds=settings.circuit_breaker_open_seconds,
+    )
 
     health_host = os.getenv("HEALTH_HOST", "0.0.0.0")
     health_port = int(os.getenv("HEALTH_PORT", "8080"))
@@ -116,12 +129,6 @@ async def main() -> None:
 
         event_fetcher = EventFetcher(
             gamma=gamma,
-            store=store,
-            logger=logger,
-            event_filter=include_event,
-            bucket_classifier=classify_event_bucket,
-            bucket_matcher=bucket_time_match,
-            persist_candidate_snapshot=False,
         )
 
         try:
@@ -134,165 +141,89 @@ async def main() -> None:
                 exc,
             )
 
-        async def check_event_for_99pct_and_safety(event_id: str) -> dict[str, Any] | None:
-            cached = candidate_events.get(event_id)
-            if not cached:
-                return None
-
-            event = await event_fetcher.refresh_event(event_id)
-            if not event:
-                return None
-
-            event_bucket = str(cached.get("bucket") or classify_event_bucket(event) or "")
-            if not event_bucket:
-                return None
-
-            markets = event.get("markets") or []
-            if not isinstance(markets, list):
-                return None
-
-            best: dict[str, Any] | None = None
-            tweet_count = event.get("tweetCount")
-            title = str(event.get("title") or cached.get("title") or event_id)
-            event_type_value = str(cached.get("event_type") or event_type_for_event(event) or "")
-
-            for market in markets:
-                market_id = str(market.get("id") or "")
-                if not market_id:
-                    continue
-
-                token_ids = extract_token_ids(market)
-                if not token_ids:
-                    continue
-
-                yes_token, no_token = token_ids
-                yes_book = await clob.get_order_book_safe(yes_token, use_cache=False)
-                no_book = await clob.get_order_book_safe(no_token, use_cache=False)
-                if yes_book is None or no_book is None:
-                    continue
-
-                yes_ask = yes_book.best_ask()
-                no_ask = no_book.best_ask()
-                if max(yes_ask, no_ask) < settings.high_prob_threshold:
-                    continue
-
-                side = "YES" if yes_ask >= no_ask else "NO"
-                token_id = yes_token if side == "YES" else no_token
-                chosen_book = yes_book if side == "YES" else no_book
-                price = yes_ask if side == "YES" else no_ask
-                expected_price = float(market.get("bestAsk") or price)
-
-                if not risk.validate_liquidity(float(market.get("liquidityNum") or market.get("liquidity") or 0.0)):
-                    continue
-
-                if not risk.slippage_ok(expected_price, price):
-                    continue
-
-                effective_slippage = abs(price - expected_price) / expected_price if expected_price > 0 else 1.0
-                if effective_slippage > 0.015:
-                    continue
-
-                available = chosen_book.cumulative_notional("BUY")
-                size = risk.position_size_for_price(price, available)
-                if size <= 0:
-                    continue
-
-                safety_margin = 10_000.0
-                if event_type_value == "tweet":
-                    if not isinstance(tweet_count, int):
-                        continue
-                    safe, margin = tweet_safety_check(tweet_count, market)
-                    if not safe:
-                        continue
-                    safety_margin = float(margin)
-                elif event_type_value == "crypto":
-                    safe, margin = await crypto_safety_check_live_price(
-                        session,
-                        market,
-                        "1hour" if event_bucket == "hourly" else event_bucket,
-                        event_title=title,
-                    )
-                    if not safe:
-                        continue
-                    safety_margin = float(margin)
-                else:
-                    continue
-
-                expected_profit = max((1.0 - price) * size, 0.0)
-                candidate = {
-                    "event_id": event_id,
-                    "bucket": event_bucket,
-                    "market_id": market_id,
-                    "token_id": token_id,
-                    "side": side,
-                    "price": price,
-                    "size": size,
-                    "confidence": max(yes_ask, no_ask),
-                    "safety_margin": safety_margin,
-                    "edge": expected_profit,
-                    "strategy": "high_probability",
-                    "endDate": str(event.get("endDate") or cached.get("endDate") or ""),
-                }
-
-                if best is None:
-                    best = candidate
-                    continue
-
-                if candidate["edge"] > best["edge"] or (
-                    candidate["edge"] == best["edge"] and candidate["safety_margin"] > best["safety_margin"]
-                ):
-                    best = candidate
-
-            return best
-
         async def discovery_task() -> None:
+            """Discovers and incrementally refreshes candidate events at fixed intervals."""
             logger.info("Discovery task started (interval=%ss)", discovery_poll_seconds)
             while not stop_event.is_set():
                 try:
                     if await circuit_breaker.wait_if_open():
                         continue
 
-                    grouped = await event_fetcher.fetch_relevant_events()
+                    events = await event_fetcher.fetch_events()
                     discovered = 0
                     newly_added = 0
                     updated_existing = 0
                     current_price_btc: float | None = None
+                    filtered_events: list[dict[str, str]] = []
+                    seen_event_ids: set[str] = set()
 
                     with contextlib.suppress(Exception):
                         current_price_btc = await fetch_binance_btc_price(session)
 
-                    for bucket, items in grouped.items():
-                        discovered += len(items)
-                        for item in items:
-                            item_type = event_type_for_event(item.raw_data)
-                            if item_type is None:
-                                continue
-                            refreshed_current_price = current_price_btc if item_type == "crypto" else None
-                            refreshed_tweet_count = item.tweetCount if item_type == "tweet" else None
+                    for event in events:
+                        if not include_event(event):
+                            continue
 
-                            if item.event_id in candidate_events:
-                                # Incremental refresh for existing entries: no full event pull.
-                                existing = candidate_events[item.event_id]
-                                existing["title"] = item.title or existing.get("title")
-                                existing["endDate"] = item.endDate or existing.get("endDate")
-                                existing["bucket"] = bucket
-                                existing["event_type"] = item_type
-                                existing["tweetCount"] = refreshed_tweet_count
-                                existing["current_price"] = refreshed_current_price
-                                updated_existing += 1
-                                continue
+                        event_id = str(event.get("id") or "")
+                        if not event_id or event_id in seen_event_ids:
+                            continue
+                        seen_event_ids.add(event_id)
 
-                            # New events fetch full details once, then cache.
-                            full_event = await event_fetcher.refresh_event(item.event_id)
-                            row_source = full_event if isinstance(full_event, dict) and full_event else item.raw_data
-                            row = candidate_row(item)
-                            row["bucket"] = bucket
-                            row["raw_data"] = row_source
-                            row["event_type"] = item_type
-                            row["tweetCount"] = refreshed_tweet_count
-                            row["current_price"] = refreshed_current_price
-                            candidate_events[item.event_id] = row
-                            newly_added += 1
+                        bucket = classify_event_bucket(event)
+                        if not bucket:
+                            continue
+
+                        event_type = event_type_for_event(event)
+                        if event_type not in {"tweet", "crypto"}:
+                            continue
+
+                        # Keep filtered_events as pre-bucket-time shortlist visibility.
+                        filtered_events.append(
+                            {
+                                "event_id": event_id,
+                                "title": str(event.get("title") or event_id),
+                                "classification": bucket,
+                            }
+                        )
+                        if not bucket_time_match(event, bucket):
+                            continue
+
+                        discovered += 1
+                        item = CandidateEvent(
+                            event_id=event_id,
+                            title=str(event.get("title") or event_id),
+                            endDate=str(event.get("endDate") or ""),
+                            tweetCount=event.get("tweetCount"),
+                            event_type=event_type,
+                            current_price=current_price_btc if event_type == "crypto" else None,
+                            bucket=bucket,
+                            raw_data=event,
+                        )
+
+                        refreshed_current_price = item.current_price
+                        refreshed_tweet_count = item.tweetCount if event_type == "tweet" else None
+
+                        if item.event_id in candidate_events:
+                            # Incremental refresh for existing entries: no full event pull.
+                            existing = candidate_events[item.event_id]
+                            existing["title"] = item.title or existing.get("title")
+                            existing["endDate"] = item.endDate or existing.get("endDate")
+                            existing["bucket"] = bucket
+                            existing["event_type"] = event_type
+                            existing["tweetCount"] = refreshed_tweet_count
+                            existing["current_price"] = refreshed_current_price
+                            updated_existing += 1
+                            continue
+
+                        # New events fetch full details once, then cache.
+                        full_event = await event_fetcher.refresh_event(item.event_id)
+                        row_source = full_event if isinstance(full_event, dict) and full_event else item.raw_data
+                        row = candidate_row(item)
+                        row["raw_data"] = row_source
+                        candidate_events[item.event_id] = row
+                        newly_added += 1
+
+                    await store.replace_filtered_events(filtered_events)
 
                     await persist_candidate_snapshot(store, candidate_events, logger)
                     health.heartbeat()
@@ -315,14 +246,15 @@ async def main() -> None:
                     pass
 
         async def bucket_polling_task(bucket: str, interval_seconds: int) -> None:
+            """Polls one bucket for opportunities and enqueues highest-priority candidates."""
             logger.info("Bucket task started: %s (interval=%ss)", bucket, interval_seconds)
             while not stop_event.is_set():
                 try:
                     if await circuit_breaker.wait_if_open():
                         continue
 
-                    if opportunities_queue.qsize() > 5:
-                        delay = min(interval_seconds, 10)
+                    if opportunities_queue.qsize() > settings.queue_backpressure_threshold:
+                        delay = min(interval_seconds, settings.queue_backpressure_sleep_seconds)
                         logger.warning(
                             "Back-pressure active for bucket=%s queue_depth=%s; slowing polling by %ss",
                             bucket,
@@ -331,6 +263,13 @@ async def main() -> None:
                         )
                         await asyncio.sleep(delay)
                         continue
+
+                    logger.info(
+                        "Bucket task tick: bucket=%s candidate_count=%s queue_depth=%s",
+                        bucket,
+                        sum(1 for event_data in candidate_events.values() if str(event_data.get("bucket") or "") == bucket),
+                        opportunities_queue.qsize(),
+                    )
 
                     bucket_event_ids = [
                         event_id
@@ -344,7 +283,16 @@ async def main() -> None:
                         if event_id not in candidate_events:
                             continue
 
-                        opportunity = await check_event_for_99pct_and_safety(event_id)
+                        opportunity = await strategy.evaluate_event_opportunity(
+                            event_id=event_id,
+                            candidate_events=candidate_events,
+                            event_fetcher=event_fetcher,
+                            clob=clob,
+                            risk=risk,
+                            session=session,
+                            classify_event_bucket=classify_event_bucket,
+                            event_type_for_event=event_type_for_event,
+                        )
                         if not opportunity:
                             continue
 
@@ -379,6 +327,7 @@ async def main() -> None:
                     pass
 
         async def execution_consumer_task() -> None:
+            """Consumes prioritized opportunities and executes trades in urgency order."""
             logger.info("Execution consumer started")
             while not stop_event.is_set() or not opportunities_queue.empty():
                 try:

@@ -34,18 +34,12 @@ MONTHLY_TITLE_PATTERN = re.compile(
 CRYPTO_SAFETY_THRESHOLDS = {
     "5min": 0.50,
     "15min": 0.75,
-    "1hour": 1.25,
     "hourly": 1.25,
     "4hour": 2.00,
     "daily": 3.00,
     "weekly": 4.00,
     "monthly": 5.00,
 }
-
-
-def crypto_discovery_params() -> dict[str, str]:
-    """Returns a narrowed discovery query for bitcoin-tagged crypto events."""
-    return {"tag_id": BITCOIN_TAG_ID}
 
 
 def is_crypto_event(event: dict[str, Any]) -> bool:
@@ -70,7 +64,7 @@ def classify_crypto_bucket(event: dict[str, Any]) -> str | None:
         if "btc-updown-15m" in slug:
             return "15min"
         if "btc-updown-1h" in slug:
-            return "1hour"
+            return "hourly"
         if "btc-updown-4h" in slug:
             return "4hour"
 
@@ -97,7 +91,7 @@ def crypto_bucket_time_match(event: dict[str, Any], bucket: str | None) -> bool:
         return remaining <= 1
     if bucket == "15min":
         return remaining <= 3
-    if bucket in {"1hour", "hourly"}:
+    if bucket in {"hourly"}:
         return remaining <= 10
     if bucket == "4hour":
         return remaining <= 20
