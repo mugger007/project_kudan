@@ -41,7 +41,6 @@ try:
   print('✓ Config loaded')
   print(f'  DB: {s.db_path}')
   print(f'  DRY_RUN: {s.dry_run}')
-  print(f'  VPN: {s.vpn_enabled}')
 except Exception as e:
   print(f'✗ Config error: {e}')
   exit(1)

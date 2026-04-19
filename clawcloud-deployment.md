@@ -53,28 +53,13 @@ Configure health check path as:
 - Interval: 30s
 - Timeout: 5s
 
-## 6. VPN Inside Container (Optional)
-
-To enable OpenVPN with Proton `.ovpn` config in container mode:
-
-1. Enable privileged/container capabilities in Launchpad (NET_ADMIN and TUN device support).
-2. Ensure `openvpn` is available in the image.
-3. Mount your Proton `.ovpn` file into the container.
-4. Set:
-   - `VPN_ENABLED=true`
-   - `OPENVPN_CONFIG_FILE=/path/to/your/proton.ovpn`
-   - `OPENVPN_EXECUTABLE=openvpn`
-   - Optional: `OPENVPN_AUTH_FILE=/path/to/auth.txt`
-
-Kudan runs a reconnect watch loop and entrypoint first-attempt connect.
-
-## 7. Verify Runtime
+## 6. Verify Runtime
 
 - Logs should show: `Kudan awakened`.
 - Health endpoint should return HTTP 200.
 - Telegram should receive startup alert if configured.
 
-## 8. Cost Control Tips
+## 7. Cost Control Tips
 
 - Keep adaptive polling enabled.
 - Start with `DRY_RUN=true`.

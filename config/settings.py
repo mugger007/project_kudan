@@ -38,14 +38,6 @@ class AppSettings:
     max_slippage_pct: float
     high_prob_threshold: float
 
-    vpn_enabled: bool
-    vpn_reconnect_seconds: int
-    openvpn_config_file: str
-    openvpn_executable: str
-    openvpn_auth_file: str
-    openvpn_username: str
-    openvpn_password: str
-
 
 def _parse_bool(value: str | None, default: bool = False) -> bool:
     """Parses a loose boolean string while supporting common truthy values."""
@@ -96,11 +88,4 @@ def load_settings(extra_env_files: Sequence[str] | None = None) -> AppSettings:
         min_liquidity_usd=float(os.getenv("MIN_LIQUIDITY_USD", "200.0")),
         max_slippage_pct=float(os.getenv("MAX_SLIPPAGE_PCT", "0.0075")),
         high_prob_threshold=float(os.getenv("HIGH_PROB_THRESHOLD", "0.99")),
-        vpn_enabled=_parse_bool(os.getenv("VPN_ENABLED"), default=False),
-        vpn_reconnect_seconds=int(os.getenv("VPN_RECONNECT_SECONDS", "60")),
-        openvpn_config_file=os.getenv("OPENVPN_CONFIG_FILE", "").strip(),
-        openvpn_executable=os.getenv("OPENVPN_EXECUTABLE", "openvpn").strip(),
-        openvpn_auth_file=os.getenv("OPENVPN_AUTH_FILE", "").strip(),
-        openvpn_username=os.getenv("OPENVPN_USERNAME", "").strip(),
-        openvpn_password=os.getenv("OPENVPN_PASSWORD", "").strip(),
     )

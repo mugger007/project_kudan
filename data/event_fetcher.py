@@ -35,6 +35,7 @@ class EventFetcher:
         event_filter: Callable[[dict[str, Any]], bool] | None = None,
         bucket_classifier: Callable[[dict[str, Any]], str | None] | None = None,
         bucket_matcher: Callable[[dict[str, Any], str], bool] | None = None,
+        persist_candidate_snapshot: bool = True,
     ):
         self.gamma = gamma
         self.store = store
@@ -43,6 +44,7 @@ class EventFetcher:
         self.event_filter = event_filter
         self.bucket_classifier = bucket_classifier
         self.bucket_matcher = bucket_matcher
+        self.persist_candidate_snapshot = persist_candidate_snapshot
 
     async def _fetch_keyset_all(self, extra_params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         """Walks /events/keyset cursor pagination and returns active event rows."""
@@ -109,19 +111,20 @@ class EventFetcher:
 
         await self.store.replace_filtered_events(filtered_events)
 
-        await self.store.replace_candidate_events(
-            [
-                {
-                    "event_id": item.event_id,
-                    "title": item.title,
-                    "endDate": item.endDate,
-                    "tweetCount": item.tweetCount,
-                    "bucket": item.bucket,
-                    "raw_data": item.raw_data,
-                }
-                for item in shortlisted
-            ]
-        )
+        if self.persist_candidate_snapshot:
+            await self.store.replace_candidate_events(
+                [
+                    {
+                        "event_id": item.event_id,
+                        "title": item.title,
+                        "endDate": item.endDate,
+                        "tweetCount": item.tweetCount,
+                        "bucket": item.bucket,
+                        "raw_data": item.raw_data,
+                    }
+                    for item in shortlisted
+                ]
+            )
 
         grouped: dict[str, list[CandidateEvent]] = {}
         for candidate in shortlisted:

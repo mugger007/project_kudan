@@ -91,6 +91,8 @@ class SqliteStore:
                     title TEXT NOT NULL,
                     endDate TEXT,
                     tweetCount INTEGER,
+                    event_type TEXT NOT NULL DEFAULT 'tweet',
+                    current_price REAL,
                     bucket TEXT NOT NULL,
                     raw_data TEXT NOT NULL,
                     last_fetched TEXT NOT NULL
@@ -110,6 +112,21 @@ class SqliteStore:
                 ON filtered_events (classification);
                 """
             )
+
+            cursor = await db.execute("PRAGMA table_info(candidate_events)")
+            columns = {str(row[1]) for row in await cursor.fetchall()}
+            if "event_type" not in columns:
+                await db.execute("ALTER TABLE candidate_events ADD COLUMN event_type TEXT NOT NULL DEFAULT 'tweet'")
+            if "current_price" not in columns:
+                await db.execute("ALTER TABLE candidate_events ADD COLUMN current_price REAL")
+
+            await db.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_candidate_events_type_bucket
+                ON candidate_events (event_type, bucket)
+                """
+            )
+
             await db.commit()
 
     async def log_scan(self, market_id: str, strategy: str, payload: dict) -> None:
@@ -192,14 +209,16 @@ class SqliteStore:
             for row in rows:
                 await db.execute(
                     """
-                    INSERT INTO candidate_events (event_id, title, endDate, tweetCount, bucket, raw_data, last_fetched)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO candidate_events (event_id, title, endDate, tweetCount, event_type, current_price, bucket, raw_data, last_fetched)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         str(row.get("event_id") or ""),
                         str(row.get("title") or ""),
                         str(row.get("endDate") or ""),
                         row.get("tweetCount"),
+                        str(row.get("event_type") or "tweet"),
+                        row.get("current_price"),
                         str(row.get("bucket") or "monthly"),
                         json.dumps(row.get("raw_data") or {}),
                         fetched_ts,
@@ -232,7 +251,7 @@ class SqliteStore:
         async with self._connect() as db:
             cursor = await db.execute(
                 """
-                SELECT event_id, title, endDate, tweetCount, bucket, raw_data, last_fetched
+                SELECT event_id, title, endDate, tweetCount, event_type, current_price, bucket, raw_data, last_fetched
                 FROM candidate_events
                 WHERE bucket = ?
                 ORDER BY endDate ASC
@@ -249,9 +268,11 @@ class SqliteStore:
                     "title": row[1],
                     "endDate": row[2],
                     "tweetCount": row[3],
-                    "bucket": row[4],
-                    "raw_data": json.loads(row[5] or "{}"),
-                    "last_fetched": row[6],
+                    "event_type": row[4],
+                    "current_price": row[5],
+                    "bucket": row[6],
+                    "raw_data": json.loads(row[7] or "{}"),
+                    "last_fetched": row[8],
                 }
             )
         return events

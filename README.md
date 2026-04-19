@@ -8,67 +8,13 @@ The stack is now optimized for ClawCloud Run deployment through App Launchpad us
 
 ## Core Features
 
-- Async multi-loop scanner with adaptive intervals for lower idle CPU usage.
-- FastAPI health endpoint at /health for ClawCloud checks.
-- Gamma market ingestion + CLOB order book checks.
-- Telegram alerts, SQLite logging, and RPC failover.
-- Optional OpenVPN startup and auto-reconnect loop using Proton .ovpn configs.
-
-## Updated Structure
-
-|- main.py
-|- entrypoint.sh
-|- requirements.txt
-|- .env.example
-|- Dockerfile
-|- docker-compose.yml
-|- clawcloud-deployment.md
-|- config/
-|  |- __init__.py
-|  |- buckets.py
-|  |- settings.py
-|- data/
-|  |- __init__.py
-|  |- auth.py
-|  |- cache.py
-|  |- clob_client.py
-|  |- event_fetcher.py
-|  |- gamma_client.py
-|  |- models.py
-|  |- rate_limits.py
-|  |- rules/
-|     |- __init__.py
-|     |- tweet_rules.py
-|     |- crypto_rules.py
-|- db/
-|  |- __init__.py
-|  |- sqlite_store.py
-|- strategies/
-|  |- __init__.py
-|  |- base.py
-|  |- high_prob.py
-|- execution/
-|  |- __init__.py
-|  |- order_builder.py
-|  |- redeem.py
-|  |- trader.py
-|- monitoring/
-|  |- __init__.py
-|  |- alerts.py
-|  |- dashboard.py
-|  |- health.py
-|  |- logger.py
-|- utils/
-|  |- __init__.py
-|  |- crypto_parser.py
-|  |- retry.py
-|  |- risk.py
-|  |- rpc.py
-|  |- time_utils.py
-|  |- tweet_parser.py
-|  |- vpn.py
-|- systemd/
-   |- kudan.service
+- Pure asyncio 3-stage scheduler (discovery, per-bucket polling, execution consumer) with zero threads.
+- Priority-first opportunity execution using asyncio.PriorityQueue (shortest time-to-resolution first).
+- Incremental candidate refresh for low latency: full fetch only for new events, lightweight refresh for existing events.
+- Back-pressure guard: bucket polling auto-slows when queue depth exceeds threshold.
+- Circuit breaker: pauses scheduler after repeated failures and emits Telegram alert.
+- FastAPI health endpoint at /health with queue depth, candidate count, and circuit state.
+- SQLite persistence for scans/opportunities/trades plus candidate snapshot crash recovery.
 
 ## ClawCloud Setup
 
@@ -94,42 +40,36 @@ Detailed guide: see clawcloud-deployment.md.
 
 ## High-Probability Discovery Workflow
 
-Kudan now uses a single high-probability strategy pipeline:
+Kudan uses a latency-first 3-stage pipeline:
 
-1. Periodic event discovery every 5-15 minutes from Gamma /events/keyset with cursor paging.
-2. Relevance filter from the start:
-   - Tweet events: Elon tweet series matching title/ticker checks and tweet tag rules.
-   - Crypto events: Bitcoin/Crypto Prices tagged events matching crypto title/slug rules.
-3. Bucket classification and prefiltering into 5min/15min/1hour/4hour/hourly/daily/weekly/monthly.
-4. Candidate snapshot caching into SQLite candidate_events table.
-5. Per-bucket scanners refresh each event, enforce 99% checks, then select one BestMarket and execute.
+1. Discovery stage:
+   - Runs every DISCOVERY_POLL_SECONDS.
+   - Fetches relevant tweet and crypto events.
+   - Adds only new events with one-time full detail fetch.
+   - Refreshes existing candidates incrementally (tweetCount for tweet events, current_price for crypto events).
 
-Bucket intervals:
+2. Per-bucket polling stage:
+   - One long-running task per bucket (5min/15min/hourly/4hour/daily/weekly/monthly).
+   - Scans only matching in-memory candidates.
+   - Applies 99% threshold, liquidity/slippage checks, and tweet/crypto safety rules.
+   - Pushes valid opportunities to a PriorityQueue by remaining seconds to event end.
 
-- 5min/15min: 15-30 seconds
-- 1hour: 30-60 seconds
-- 4hour: 60-120 seconds
-- hourly: 30-60 seconds
-- daily: 60 seconds
-- weekly/monthly: 5 minutes
+3. Execution stage:
+   - Consumes opportunities in urgency order (nearest resolution first).
+   - Executes immediately and logs outcomes to SQLite.
+   - Sends Telegram alerts via execution pipeline.
 
-For tweet events, markets within plus/minus 10 tweets of boundaries are rejected.
-Remaining markets are ranked by expected profit, with tweet boundary distance used as a safety tie-breaker.
+Candidate schema in SQLite candidate_events now supports mixed event types:
+
+- event_type: tweet or crypto
+- tweetCount: used for tweet events
+- current_price: used for crypto events
 
 ## Local Docker Test
 
 docker compose up -d --build
 docker compose logs -f kudan
 curl http://127.0.0.1:8080/health
-
-## OpenVPN (Proton Config) in Container
-
-- Set VPN_ENABLED=true and OPENVPN_CONFIG_FILE.
-- Optional: set OPENVPN_EXECUTABLE (for example `openvpn` or `openvpn-gui.exe`).
-- Optional: set OPENVPN_AUTH_FILE if your .ovpn requires auth-user-pass credentials.
-- Ensure container has NET_ADMIN capability and TUN access.
-- If VPN is disabled, entrypoint drops privileges and runs as non-root user.
-- If VPN is enabled, container may run as root depending on network requirements.
 
 ## Security Notes
 

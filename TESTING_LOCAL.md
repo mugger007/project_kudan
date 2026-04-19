@@ -66,7 +66,6 @@ Response should be JSON:
   "status": "ok",
   "api_ok": true,
   "rpc_ok": true,
-  "vpn_ok": true,
   "last_market_scan": "2026-04-17T14:32:30Z",
   "cached_markets": 142,
   "dashboard": {
@@ -96,16 +95,7 @@ Stop:
 docker compose down
 ```
 
-## 4. VPN Testing (Optional)
-
-If you have OpenVPN and a Proton `.ovpn` config:
-1. Set `VPN_ENABLED=true` in `.env`
-2. Set `OPENVPN_CONFIG_FILE` to your `.ovpn` path
-3. Set `OPENVPN_EXECUTABLE` to `openvpn` or `openvpn-gui.exe`
-4. Optional: set `OPENVPN_AUTH_FILE` if required by your profile
-5. Run the bot; entrypoint will attempt to connect before starting Kudan
-
-## 5. Database & Logging
+## 4. Database & Logging
 
 ### SQLite Database
 - Default location (local): `./kudan.db` (from `.env.example`)
@@ -123,7 +113,7 @@ python main.py > kudan.log 2>&1 &
 tail -f kudan.log
 ```
 
-## 6. Stress Testing
+## 5. Stress Testing
 
 ### Dry-Run Coverage
 With `DRY_RUN=true`, the bot will:
@@ -147,7 +137,7 @@ MIN_LIQUIDITY_USD=200.0
 MAX_SLIPPAGE_PCT=0.0075
 ```
 
-## 7. Troubleshooting
+## 6. Troubleshooting
 
 ### Import Errors
 If you see import errors, reinstall dependencies:
@@ -170,7 +160,7 @@ If `/health` returns 500:
 - Verify all async tasks are running
 - Restart the bot
 
-## 8. Ready for ClawCloud?
+## 7. Ready for ClawCloud?
 
 Once local testing passes:
 1. ✓ Bot starts without errors

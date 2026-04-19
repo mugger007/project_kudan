@@ -15,9 +15,3 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
-
-    # Required when VPN is enabled. ClawCloud Launchpad may require privileged toggle.
-    cap_add:
-      - NET_ADMIN
-    devices:
-      - /dev/net/tun:/dev/net/tun

@@ -5,169 +5,54 @@ import contextlib
 import os
 import signal
 import socket
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
-from datetime import datetime, timezone
 from typing import Any
 
 import aiohttp
-import uvicorn
-from fastapi import FastAPI
-from web3 import HTTPProvider, Web3
 
-from config import AppSettings, load_settings
+from config import load_settings
 from data import ClobClient, EventFetcher, GammaClient
 from data.auth import ClobAuthError
 from data.rate_limits import RateLimiterRegistry
-from data.rules.crypto_rules import classify_crypto_bucket, crypto_bucket_time_match, is_crypto_event
-from data.rules.tweet_rules import classify_tweet_bucket, is_elon_tweet_event, tweet_bucket_time_match
+from data.rules.crypto_rules import (
+    fetch_binance_btc_price,
+    crypto_safety_check_live_price,
+)
+from data.rules.tweet_rules import (
+    tweet_safety_check,
+)
 from db import SqliteStore
-from execution import Redeemer, TradeExecutor
+from execution import TradeExecutor
+from execution.execute_trade import execute_trade
 from monitoring import Dashboard, HealthState, TelegramAlerter, setup_logging
-from strategies.high_prob import HighProbabilityStrategy
 from utils.risk import RiskManager
-from utils.rpc import RpcRotator
-from utils.vpn import OpenVpnController
-
-
-@dataclass(slots=True)
-class AdaptiveInterval:
-    """Adjusts loop intervals dynamically to keep idle workloads lightweight."""
-
-    base_seconds: float
-    max_scale: float
-    recovery: float
-    current_scale: float = 1.0
-
-    def next_timeout(self, had_opportunity: bool) -> float:
-        """Returns next sleep duration while shrinking latency after signals appear."""
-        if had_opportunity:
-            self.current_scale = max(1.0, self.current_scale * self.recovery)
-        else:
-            self.current_scale = min(self.max_scale, self.current_scale * 1.15)
-        return max(self.base_seconds * self.current_scale, 1.0)
-
-
-def build_health_app(health: HealthState, dashboard: Dashboard) -> FastAPI:
-    """Builds a minimal health endpoint for ClawCloud checks."""
-    app = FastAPI(title="Kudan Health", version="1.0.0")
-
-    @app.get("/health")
-    async def health_check() -> dict[str, Any]:
-        return {
-            "status": "ok" if health.api_ok and health.rpc_ok else "degraded",
-            "api_ok": health.api_ok,
-            "rpc_ok": health.rpc_ok,
-            "vpn_ok": health.vpn_ok,
-            "last_market_scan": health.last_market_scan_ts.isoformat(),
-            "dashboard": {
-                "scanned_markets": dashboard.scanned_markets,
-                "opportunities_found": dashboard.opportunities_found,
-                "trades_sent": dashboard.trades_sent,
-            },
-        }
-
-    return app
-
-
-async def ensure_rpc_health(settings: AppSettings, rpc_rotator: RpcRotator, logger, health: HealthState) -> None:
-    """Checks Polygon RPC health and rotates to fallbacks on failures."""
-    for _ in range(1 + len(settings.polygon_rpc_fallbacks)):
-        rpc_url = rpc_rotator.current()
-
-        def _check() -> int:
-            return Web3(HTTPProvider(rpc_url)).eth.block_number
-
-        try:
-            block = await asyncio.to_thread(_check)
-            logger.debug("RPC healthy at %s (block %s)", rpc_url, block)
-            health.rpc_ok = True
-            return
-        except Exception as exc:
-            logger.warning("RPC check failed for %s: %s", rpc_url, exc)
-            rpc_rotator.next()
-
-    health.rpc_ok = False
-
-
-async def wait_for_http_endpoint(
-    session: aiohttp.ClientSession,
-    url: str,
-    logger,
-    *,
-    name: str,
-    attempts: int = 6,
-    base_delay: float = 2.0,
-) -> None:
-    """Waits until an HTTP endpoint responds so startup does not race VPN route changes."""
-    last_error: Exception | None = None
-    for attempt in range(1, attempts + 1):
-        try:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                if resp.status < 500:
-                    logger.info("%s endpoint is reachable (%s)", name, resp.status)
-                    return
-                last_error = RuntimeError(f"{name} returned HTTP {resp.status}")
-        except Exception as exc:
-            last_error = exc
-
-        if attempt < attempts:
-            delay = base_delay * (2 ** (attempt - 1))
-            logger.warning("Waiting for %s endpoint (%s/%s): %s; retry in %ss", name, attempt, attempts, last_error, delay)
-            await asyncio.sleep(delay)
-
-    raise RuntimeError(f"{name} endpoint remained unreachable after {attempts} attempts: {last_error}")
-
-
-async def looping_task(
-    name: str,
-    interval_seconds: int,
-    work: Callable[[], Awaitable[int]],
-    logger,
-    stop_event: asyncio.Event,
-    max_scale: float,
-    recovery: float,
-) -> None:
-    """Runs one repeating task with adaptive sleep and graceful stop behavior."""
-    adaptive = AdaptiveInterval(base_seconds=interval_seconds, max_scale=max_scale, recovery=recovery)
-    logger.info("Starting task %s every ~%ss", name, interval_seconds)
-    while not stop_event.is_set():
-        started = datetime.now(timezone.utc)
-        found = 0
-        try:
-            found = await work()
-        except Exception as exc:
-            logger.exception("Task %s failed: %s", name, exc)
-
-        elapsed = (datetime.now(timezone.utc) - started).total_seconds()
-        sleep_for = max(adaptive.next_timeout(had_opportunity=found > 0) - elapsed, 1)
-        try:
-            await asyncio.wait_for(stop_event.wait(), timeout=sleep_for)
-        except asyncio.TimeoutError:
-            pass
-
-
-async def serve_health_api(app: FastAPI, host: str, port: int, logger, stop_event: asyncio.Event) -> None:
-    """Runs in-process health API server and exits when stop is requested."""
-    config = uvicorn.Config(app, host=host, port=port, log_level="warning", lifespan="off")
-    server = uvicorn.Server(config)
-    server.install_signal_handlers = lambda: None
-
-    task = asyncio.create_task(server.serve())
-    logger.info("Health endpoint listening at http://%s:%s/health", host, port)
-    await stop_event.wait()
-    server.should_exit = True
-    with contextlib.suppress(asyncio.CancelledError):
-        await task
+from utils.runtime_helpers import (
+    build_health_app,
+    candidate_row,
+    extract_token_ids,
+    load_candidate_snapshot,
+    persist_candidate_snapshot,
+    serve_health_api,
+    wait_for_http_endpoint,
+)
+from utils.scheduler_helpers import (
+    CircuitBreaker,
+    bucket_time_match,
+    classify_event_bucket,
+    event_type_for_event,
+    include_event,
+    load_scheduler_intervals,
+    remaining_seconds,
+)
 
 
 async def main() -> None:
-    """Bootstraps services and runs discovery plus bucket-aware high-prob loops."""
     settings = load_settings()
     logger = setup_logging(settings.log_level)
     health = HealthState()
     dashboard = Dashboard()
     stop_event = asyncio.Event()
+
+    discovery_poll_seconds, bucket_intervals = load_scheduler_intervals()
 
     def _request_stop(signum: int, _frame: Any) -> None:
         logger.warning("Signal %s received. Kudan begins graceful shutdown.", signum)
@@ -197,54 +82,20 @@ async def main() -> None:
         store=store,
         alerts=alerts,
     )
-    redeemer = Redeemer(logger, alerts)
-    rpc_rotator = RpcRotator(settings.polygon_rpc_primary, settings.polygon_rpc_fallbacks)
-    vpn = OpenVpnController(
-        enabled=settings.vpn_enabled,
-        config_file=settings.openvpn_config_file,
-        reconnect_seconds=settings.vpn_reconnect_seconds,
-        openvpn_executable=settings.openvpn_executable,
-        auth_file=settings.openvpn_auth_file,
-        username=settings.openvpn_username,
-        password=settings.openvpn_password,
-    )
-    strategy = HighProbabilityStrategy(probability_threshold=settings.high_prob_threshold)
+
+    candidate_events: dict[str, dict[str, Any]] = await load_candidate_snapshot(store, bucket_intervals)
+    opportunities_queue: asyncio.PriorityQueue[tuple[float, dict[str, Any]]] = asyncio.PriorityQueue()
+    circuit_breaker = CircuitBreaker(logger, alerts)
 
     health_host = os.getenv("HEALTH_HOST", "0.0.0.0")
     health_port = int(os.getenv("HEALTH_PORT", "8080"))
-    idle_interval_max_scale = float(os.getenv("IDLE_INTERVAL_MAX_SCALE", "2.5"))
-    active_interval_recovery = float(os.getenv("ACTIVE_INTERVAL_RECOVERY", "0.65"))
-    discovery_seconds = int(os.getenv("DISCOVERY_POLL_SECONDS", "600"))
-
-    # Required workflow poll intervals.
-    bucket_intervals = {
-        "5min": int(os.getenv("BUCKET_5MIN_SECONDS", "20")),
-        "15min": int(os.getenv("BUCKET_15MIN_SECONDS", "30")),
-        "1hour": int(os.getenv("BUCKET_1HOUR_SECONDS", "60")),
-        "4hour": int(os.getenv("BUCKET_4HOUR_SECONDS", "270")),
-        "hourly": int(os.getenv("BUCKET_HOURLY_SECONDS", "60")),
-        "daily": int(os.getenv("BUCKET_DAILY_SECONDS", "1440")),
-        "weekly": int(os.getenv("BUCKET_WEEKLY_SECONDS", "10080")),
-        "monthly": int(os.getenv("BUCKET_MONTHLY_SECONDS", "43200")),
-    }
-
-    health_app = build_health_app(health, dashboard)
-
-    if settings.vpn_enabled:
-        try:
-            await vpn.ensure_connected(logger)
-            await asyncio.sleep(10)
-            health.vpn_ok = True
-        except Exception as exc:
-            health.vpn_ok = False
-            logger.exception("Initial VPN connection failed: %s", exc)
-            raise
 
     connector = aiohttp.TCPConnector(
         family=socket.AF_INET,
         ttl_dns_cache=30,
         enable_cleanup_closed=True,
     )
+
     async with aiohttp.ClientSession(headers={"User-Agent": "Kudan/0.1"}, connector=connector) as session:
         await wait_for_http_endpoint(session, f"{settings.gamma_base_url.rstrip('/')}/", logger, name="Gamma")
         await wait_for_http_endpoint(session, f"{settings.clob_base_url.rstrip('/')}/", logger, name="CLOB")
@@ -262,30 +113,15 @@ async def main() -> None:
             api_passphrase=settings.clob_api_passphrase,
             rate_limiter_registry=shared_limiters,
         )
-        def include_event(event: dict[str, Any]) -> bool:
-            return is_elon_tweet_event(event) or is_crypto_event(event)
-
-        def classify_event(event: dict[str, Any]) -> str | None:
-            if is_elon_tweet_event(event):
-                return classify_tweet_bucket(event)
-            if is_crypto_event(event):
-                return classify_crypto_bucket(event)
-            return None
-
-        def bucket_time_match(event: dict[str, Any], bucket: str) -> bool:
-            if is_elon_tweet_event(event):
-                return tweet_bucket_time_match(event, bucket)
-            if is_crypto_event(event):
-                return crypto_bucket_time_match(event, bucket)
-            return False
 
         event_fetcher = EventFetcher(
             gamma=gamma,
             store=store,
             logger=logger,
             event_filter=include_event,
-            bucket_classifier=classify_event,
+            bucket_classifier=classify_event_bucket,
             bucket_matcher=bucket_time_match,
+            persist_candidate_snapshot=False,
         )
 
         try:
@@ -298,96 +134,290 @@ async def main() -> None:
                 exc,
             )
 
-        async def discovery_work() -> int:
-            grouped = await event_fetcher.fetch_relevant_events()
-            health.heartbeat()
-            health.api_ok = True
-            discovered = sum(len(items) for items in grouped.values())
-            logger.info("Discovery shortlisted %s candidate events", discovered)
-            return 1 if discovered > 0 else 0
+        async def check_event_for_99pct_and_safety(event_id: str) -> dict[str, Any] | None:
+            cached = candidate_events.get(event_id)
+            if not cached:
+                return None
 
-        async def bucket_work(bucket: str) -> int:
-            best = await strategy.scan_high_prob_candidates(
-                bucket=bucket,
-                event_fetcher=event_fetcher,
-                clob=clob,
-                risk=risk,
-                store=store,
-                trader=trader,
-                logger=logger,
-            )
-            if best is None:
-                return 0
-            dashboard.opportunities_found += 1
-            if not trader.dry_run:
-                dashboard.trades_sent += 1
-            return 1
+            event = await event_fetcher.refresh_event(event_id)
+            if not event:
+                return None
 
-        async def health_work() -> int:
-            await ensure_rpc_health(settings, rpc_rotator, logger, health)
-            logger.info(dashboard.as_line())
-            return 0
+            event_bucket = str(cached.get("bucket") or classify_event_bucket(event) or "")
+            if not event_bucket:
+                return None
 
-        async def redeem_work() -> int:
-            await redeemer.auto_redeem()
-            return 0
+            markets = event.get("markets") or []
+            if not isinstance(markets, list):
+                return None
+
+            best: dict[str, Any] | None = None
+            tweet_count = event.get("tweetCount")
+            title = str(event.get("title") or cached.get("title") or event_id)
+            event_type_value = str(cached.get("event_type") or event_type_for_event(event) or "")
+
+            for market in markets:
+                market_id = str(market.get("id") or "")
+                if not market_id:
+                    continue
+
+                token_ids = extract_token_ids(market)
+                if not token_ids:
+                    continue
+
+                yes_token, no_token = token_ids
+                yes_book = await clob.get_order_book_safe(yes_token, use_cache=False)
+                no_book = await clob.get_order_book_safe(no_token, use_cache=False)
+                if yes_book is None or no_book is None:
+                    continue
+
+                yes_ask = yes_book.best_ask()
+                no_ask = no_book.best_ask()
+                if max(yes_ask, no_ask) < settings.high_prob_threshold:
+                    continue
+
+                side = "YES" if yes_ask >= no_ask else "NO"
+                token_id = yes_token if side == "YES" else no_token
+                chosen_book = yes_book if side == "YES" else no_book
+                price = yes_ask if side == "YES" else no_ask
+                expected_price = float(market.get("bestAsk") or price)
+
+                if not risk.validate_liquidity(float(market.get("liquidityNum") or market.get("liquidity") or 0.0)):
+                    continue
+
+                if not risk.slippage_ok(expected_price, price):
+                    continue
+
+                effective_slippage = abs(price - expected_price) / expected_price if expected_price > 0 else 1.0
+                if effective_slippage > 0.015:
+                    continue
+
+                available = chosen_book.cumulative_notional("BUY")
+                size = risk.position_size_for_price(price, available)
+                if size <= 0:
+                    continue
+
+                safety_margin = 10_000.0
+                if event_type_value == "tweet":
+                    if not isinstance(tweet_count, int):
+                        continue
+                    safe, margin = tweet_safety_check(tweet_count, market)
+                    if not safe:
+                        continue
+                    safety_margin = float(margin)
+                elif event_type_value == "crypto":
+                    safe, margin = await crypto_safety_check_live_price(
+                        session,
+                        market,
+                        "1hour" if event_bucket == "hourly" else event_bucket,
+                        event_title=title,
+                    )
+                    if not safe:
+                        continue
+                    safety_margin = float(margin)
+                else:
+                    continue
+
+                expected_profit = max((1.0 - price) * size, 0.0)
+                candidate = {
+                    "event_id": event_id,
+                    "bucket": event_bucket,
+                    "market_id": market_id,
+                    "token_id": token_id,
+                    "side": side,
+                    "price": price,
+                    "size": size,
+                    "confidence": max(yes_ask, no_ask),
+                    "safety_margin": safety_margin,
+                    "edge": expected_profit,
+                    "strategy": "high_probability",
+                    "endDate": str(event.get("endDate") or cached.get("endDate") or ""),
+                }
+
+                if best is None:
+                    best = candidate
+                    continue
+
+                if candidate["edge"] > best["edge"] or (
+                    candidate["edge"] == best["edge"] and candidate["safety_margin"] > best["safety_margin"]
+                ):
+                    best = candidate
+
+            return best
+
+        async def discovery_task() -> None:
+            logger.info("Discovery task started (interval=%ss)", discovery_poll_seconds)
+            while not stop_event.is_set():
+                try:
+                    if await circuit_breaker.wait_if_open():
+                        continue
+
+                    grouped = await event_fetcher.fetch_relevant_events()
+                    discovered = 0
+                    newly_added = 0
+                    updated_existing = 0
+                    current_price_btc: float | None = None
+
+                    with contextlib.suppress(Exception):
+                        current_price_btc = await fetch_binance_btc_price(session)
+
+                    for bucket, items in grouped.items():
+                        discovered += len(items)
+                        for item in items:
+                            item_type = event_type_for_event(item.raw_data)
+                            if item_type is None:
+                                continue
+                            refreshed_current_price = current_price_btc if item_type == "crypto" else None
+                            refreshed_tweet_count = item.tweetCount if item_type == "tweet" else None
+
+                            if item.event_id in candidate_events:
+                                # Incremental refresh for existing entries: no full event pull.
+                                existing = candidate_events[item.event_id]
+                                existing["title"] = item.title or existing.get("title")
+                                existing["endDate"] = item.endDate or existing.get("endDate")
+                                existing["bucket"] = bucket
+                                existing["event_type"] = item_type
+                                existing["tweetCount"] = refreshed_tweet_count
+                                existing["current_price"] = refreshed_current_price
+                                updated_existing += 1
+                                continue
+
+                            # New events fetch full details once, then cache.
+                            full_event = await event_fetcher.refresh_event(item.event_id)
+                            row_source = full_event if isinstance(full_event, dict) and full_event else item.raw_data
+                            row = candidate_row(item)
+                            row["bucket"] = bucket
+                            row["raw_data"] = row_source
+                            row["event_type"] = item_type
+                            row["tweetCount"] = refreshed_tweet_count
+                            row["current_price"] = refreshed_current_price
+                            candidate_events[item.event_id] = row
+                            newly_added += 1
+
+                    await persist_candidate_snapshot(store, candidate_events, logger)
+                    health.heartbeat()
+                    health.api_ok = True
+                    logger.info(
+                        "Discovery cycle complete: discovered=%s new=%s refreshed=%s in_memory=%s",
+                        discovered,
+                        newly_added,
+                        updated_existing,
+                        len(candidate_events),
+                    )
+                except Exception as exc:
+                    health.api_ok = False
+                    logger.exception("Discovery task failed: %s", exc)
+                    await circuit_breaker.record_failure("discovery", exc)
+
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=discovery_poll_seconds)
+                except asyncio.TimeoutError:
+                    pass
+
+        async def bucket_polling_task(bucket: str, interval_seconds: int) -> None:
+            logger.info("Bucket task started: %s (interval=%ss)", bucket, interval_seconds)
+            while not stop_event.is_set():
+                try:
+                    if await circuit_breaker.wait_if_open():
+                        continue
+
+                    if opportunities_queue.qsize() > 5:
+                        delay = min(interval_seconds, 10)
+                        logger.warning(
+                            "Back-pressure active for bucket=%s queue_depth=%s; slowing polling by %ss",
+                            bucket,
+                            opportunities_queue.qsize(),
+                            delay,
+                        )
+                        await asyncio.sleep(delay)
+                        continue
+
+                    bucket_event_ids = [
+                        event_id
+                        for event_id, event_data in candidate_events.items()
+                        if str(event_data.get("bucket") or "") == bucket
+                    ]
+
+                    dashboard.scanned_markets += len(bucket_event_ids)
+
+                    for event_id in bucket_event_ids:
+                        if event_id not in candidate_events:
+                            continue
+
+                        opportunity = await check_event_for_99pct_and_safety(event_id)
+                        if not opportunity:
+                            continue
+
+                        await store.log_opportunity(
+                            market_id=opportunity["market_id"],
+                            strategy=opportunity["strategy"],
+                            side=opportunity["side"],
+                            edge=float(opportunity["edge"]),
+                            confidence=float(opportunity["confidence"]),
+                            metadata={
+                                "event_id": opportunity["event_id"],
+                                "bucket": opportunity["bucket"],
+                                "safety_margin": opportunity["safety_margin"],
+                                "price": opportunity["price"],
+                                "size": opportunity["size"],
+                            },
+                        )
+
+                        await opportunities_queue.put((remaining_seconds(opportunity.get("endDate")), opportunity))
+                        dashboard.opportunities_found += 1
+                        candidate_events.pop(event_id, None)
+
+                    if bucket_event_ids:
+                        await persist_candidate_snapshot(store, candidate_events, logger)
+                except Exception as exc:
+                    logger.exception("Bucket task failed for %s: %s", bucket, exc)
+                    await circuit_breaker.record_failure(f"bucket:{bucket}", exc)
+
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=interval_seconds)
+                except asyncio.TimeoutError:
+                    pass
+
+        async def execution_consumer_task() -> None:
+            logger.info("Execution consumer started")
+            while not stop_event.is_set() or not opportunities_queue.empty():
+                try:
+                    if await circuit_breaker.wait_if_open():
+                        continue
+
+                    _priority, opportunity = await asyncio.wait_for(opportunities_queue.get(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    continue
+
+                try:
+                    await execute_trade(
+                        event_id=str(opportunity["event_id"]),
+                        market_id=str(opportunity["market_id"]),
+                        token_id=str(opportunity["token_id"]),
+                        side=str(opportunity["side"]),
+                        price=float(opportunity["price"]),
+                        size=float(opportunity["size"]),
+                        strategy=str(opportunity["strategy"]),
+                        trader=trader,
+                    )
+                    dashboard.trades_sent += 1
+                except Exception as exc:
+                    logger.exception("Execution failed for event=%s market=%s: %s", opportunity.get("event_id"), opportunity.get("market_id"), exc)
+                    await circuit_breaker.record_failure("execution", exc)
+                finally:
+                    opportunities_queue.task_done()
+
+        health_app = build_health_app(health, dashboard, candidate_events, opportunities_queue, circuit_breaker.state)
 
         tasks = [
-            asyncio.create_task(
-                looping_task(
-                    "event_discovery",
-                    discovery_seconds,
-                    discovery_work,
-                    logger,
-                    stop_event,
-                    max_scale=1.0,
-                    recovery=1.0,
-                )
-            ),
-            asyncio.create_task(
-                looping_task(
-                    "health",
-                    60,
-                    health_work,
-                    logger,
-                    stop_event,
-                    max_scale=1.0,
-                    recovery=1.0,
-                )
-            ),
-            asyncio.create_task(
-                looping_task(
-                    "redeem",
-                    600,
-                    redeem_work,
-                    logger,
-                    stop_event,
-                    max_scale=1.0,
-                    recovery=1.0,
-                )
-            ),
-            asyncio.create_task(serve_health_api(health_app, health_host, health_port, logger, stop_event)),
+            asyncio.create_task(discovery_task(), name="discovery"),
+            asyncio.create_task(execution_consumer_task(), name="execution_consumer"),
+            asyncio.create_task(serve_health_api(health_app, health_host, health_port, logger, stop_event), name="health_api"),
         ]
+        for bucket, interval_seconds in bucket_intervals.items():
+            tasks.append(asyncio.create_task(bucket_polling_task(bucket, interval_seconds), name=f"bucket_{bucket}"))
 
-        for bucket, interval in bucket_intervals.items():
-            tasks.append(
-                asyncio.create_task(
-                    looping_task(
-                        f"high_prob_{bucket}",
-                        interval,
-                        lambda b=bucket: bucket_work(b),
-                        logger,
-                        stop_event,
-                        max_scale=idle_interval_max_scale,
-                        recovery=active_interval_recovery,
-                    )
-                )
-            )
-
-        if settings.vpn_enabled:
-            tasks.append(asyncio.create_task(vpn.watch_loop(logger, stop_event)))
-
-        await alerts.send("Kudan awakened: guardian of hidden probabilities now watches the oracle realm.")
+        await alerts.send("Kudan awakened: high-speed async scheduler is active.")
 
         try:
             await asyncio.gather(*tasks)
@@ -395,10 +425,15 @@ async def main() -> None:
             logger.info("Cancellation received. Shutting down tasks.")
         finally:
             stop_event.set()
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(opportunities_queue.join(), timeout=15)
+
             for task in tasks:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
+
+            await persist_candidate_snapshot(store, candidate_events, logger)
             await alerts.send("Kudan sleeping: graceful shutdown complete.")
 
 

@@ -8,7 +8,6 @@ from datetime import datetime, timezone
 class HealthState:
     last_market_scan_ts: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     last_trade_ts: datetime | None = None
-    vpn_ok: bool = True
     rpc_ok: bool = True
     api_ok: bool = True
 
