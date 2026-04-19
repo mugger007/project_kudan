@@ -38,11 +38,6 @@ class AppSettings:
     max_slippage_pct: float
     high_prob_threshold: float
 
-    ultra_short_poll_seconds: int
-    short_poll_seconds: int
-    medium_poll_seconds: int
-    full_scan_seconds: int
-
     vpn_enabled: bool
     vpn_reconnect_seconds: int
     openvpn_config_file: str
@@ -99,10 +94,6 @@ def load_settings(extra_env_files: Sequence[str] | None = None) -> AppSettings:
         min_liquidity_usd=float(os.getenv("MIN_LIQUIDITY_USD", "200.0")),
         max_slippage_pct=float(os.getenv("MAX_SLIPPAGE_PCT", "0.0075")),
         high_prob_threshold=float(os.getenv("HIGH_PROB_THRESHOLD", "0.99")),
-        ultra_short_poll_seconds=int(os.getenv("ULTRA_SHORT_POLL_SECONDS", "20")),
-        short_poll_seconds=int(os.getenv("SHORT_POLL_SECONDS", "90")),
-        medium_poll_seconds=int(os.getenv("MEDIUM_POLL_SECONDS", "600")),
-        full_scan_seconds=int(os.getenv("FULL_SCAN_SECONDS", "120")),
         vpn_enabled=_parse_bool(os.getenv("VPN_ENABLED"), default=False),
         vpn_reconnect_seconds=int(os.getenv("VPN_RECONNECT_SECONDS", "60")),
         openvpn_config_file=os.getenv("OPENVPN_CONFIG_FILE", "").strip(),

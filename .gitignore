@@ -3,5 +3,7 @@ __pycache__/
 .venv/
 .env
 *.db
+*.db-wal
+*.db-shm
 *.sqlite3
 *.log

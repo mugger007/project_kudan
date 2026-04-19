@@ -1,10 +1,8 @@
 # Project Kudan
 
-Kudan is the guardian of hidden probabilities and forger of risk-free edges in the oracle realm.
-
 This repository is a production-ready starter for a free-tier, always-on Polymarket bot focused on:
 
-- High-Probability entries: event-driven tweet candidate workflow with bucket-aware checks.
+- High-Probability entries: event-driven tweet and crypto candidate workflows with bucket-aware checks.
 
 The stack is now optimized for ClawCloud Run deployment through App Launchpad using a container image.
 
@@ -18,7 +16,6 @@ The stack is now optimized for ClawCloud Run deployment through App Launchpad us
 
 ## Updated Structure
 
-.
 |- main.py
 |- entrypoint.sh
 |- requirements.txt
@@ -32,11 +29,17 @@ The stack is now optimized for ClawCloud Run deployment through App Launchpad us
 |  |- settings.py
 |- data/
 |  |- __init__.py
+|  |- auth.py
 |  |- cache.py
 |  |- clob_client.py
 |  |- event_fetcher.py
 |  |- gamma_client.py
 |  |- models.py
+|  |- rate_limits.py
+|  |- rules/
+|     |- __init__.py
+|     |- tweet_rules.py
+|     |- crypto_rules.py
 |- db/
 |  |- __init__.py
 |  |- sqlite_store.py
@@ -57,9 +60,12 @@ The stack is now optimized for ClawCloud Run deployment through App Launchpad us
 |  |- logger.py
 |- utils/
 |  |- __init__.py
+|  |- crypto_parser.py
 |  |- retry.py
 |  |- risk.py
 |  |- rpc.py
+|  |- time_utils.py
+|  |- tweet_parser.py
 |  |- vpn.py
 |- systemd/
    |- kudan.service
@@ -86,27 +92,29 @@ The stack is now optimized for ClawCloud Run deployment through App Launchpad us
 
 Detailed guide: see clawcloud-deployment.md.
 
-## High-Probability Tweet Workflow
+## High-Probability Discovery Workflow
 
 Kudan now uses a single high-probability strategy pipeline:
 
 1. Periodic event discovery every 5-15 minutes from Gamma /events/keyset with cursor paging.
-2. Tweet relevance filter from the start:
-   - Fetch only tweet-tagged events with `tag_id=972`.
-   - Keep Elon tweet series events using title/ticker checks.
-3. Bucket classification and prefiltering into 5min/hourly/daily/weekly/monthly.
+2. Relevance filter from the start:
+   - Tweet events: Elon tweet series matching title/ticker checks and tweet tag rules.
+   - Crypto events: Bitcoin/Crypto Prices tagged events matching crypto title/slug rules.
+3. Bucket classification and prefiltering into 5min/15min/1hour/4hour/hourly/daily/weekly/monthly.
 4. Candidate snapshot caching into SQLite candidate_events table.
-5. Per-bucket scanners refresh each event, enforce 99% checks, apply tweet boundary safety, then select one BestMarket and execute.
+5. Per-bucket scanners refresh each event, enforce 99% checks, then select one BestMarket and execute.
 
 Bucket intervals:
 
-- 5min: 15-30 seconds
+- 5min/15min: 15-30 seconds
+- 1hour: 30-60 seconds
+- 4hour: 60-120 seconds
 - hourly: 30-60 seconds
 - daily: 60 seconds
 - weekly/monthly: 5 minutes
 
 For tweet events, markets within plus/minus 10 tweets of boundaries are rejected.
-Remaining markets are ranked by safety margin distance from boundaries.
+Remaining markets are ranked by expected profit, with tweet boundary distance used as a safety tie-breaker.
 
 ## Local Docker Test
 

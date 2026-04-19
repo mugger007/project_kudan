@@ -96,8 +96,18 @@ class SqliteStore:
                     last_fetched TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS filtered_events (
+                    event_id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    classification TEXT NOT NULL,
+                    last_fetched TEXT NOT NULL
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_candidate_events_bucket
                 ON candidate_events (bucket);
+
+                CREATE INDEX IF NOT EXISTS idx_filtered_events_classification
+                ON filtered_events (classification);
                 """
             )
             await db.commit()
@@ -192,6 +202,26 @@ class SqliteStore:
                         row.get("tweetCount"),
                         str(row.get("bucket") or "monthly"),
                         json.dumps(row.get("raw_data") or {}),
+                        fetched_ts,
+                    ),
+                )
+            await db.commit()
+
+    async def replace_filtered_events(self, rows: list[dict]) -> None:
+        """Replaces filtered_events with pre-matcher classified event snapshot."""
+        fetched_ts = datetime.now(timezone.utc).isoformat()
+        async with self._connect() as db:
+            await db.execute("DELETE FROM filtered_events")
+            for row in rows:
+                await db.execute(
+                    """
+                    INSERT INTO filtered_events (event_id, title, classification, last_fetched)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (
+                        str(row.get("event_id") or ""),
+                        str(row.get("title") or ""),
+                        str(row.get("classification") or ""),
                         fetched_ts,
                     ),
                 )

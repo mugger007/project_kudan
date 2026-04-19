@@ -5,7 +5,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from data.clob_client import ClobClient
-from data.event_fetcher import CandidateEvent, EventFetcher, tweet_safety_check
+from data.event_fetcher import CandidateEvent, EventFetcher
+from data.rules.tweet_rules import tweet_safety_check
 from db.sqlite_store import SqliteStore
 from execution.execute_trade import execute_trade
 from execution.trader import TradeExecutor

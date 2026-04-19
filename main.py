@@ -18,6 +18,8 @@ from config import AppSettings, load_settings
 from data import ClobClient, EventFetcher, GammaClient
 from data.auth import ClobAuthError
 from data.rate_limits import RateLimiterRegistry
+from data.rules.crypto_rules import classify_crypto_bucket, crypto_bucket_time_match, is_crypto_event
+from data.rules.tweet_rules import classify_tweet_bucket, is_elon_tweet_event, tweet_bucket_time_match
 from db import SqliteStore
 from execution import Redeemer, TradeExecutor
 from monitoring import Dashboard, HealthState, TelegramAlerter, setup_logging
@@ -185,10 +187,13 @@ async def main() -> None:
     # Required workflow poll intervals.
     bucket_intervals = {
         "5min": int(os.getenv("BUCKET_5MIN_SECONDS", "20")),
-        "hourly": int(os.getenv("BUCKET_HOURLY_SECONDS", "45")),
-        "daily": int(os.getenv("BUCKET_DAILY_SECONDS", "60")),
-        "weekly": int(os.getenv("BUCKET_WEEKLY_SECONDS", "300")),
-        "monthly": int(os.getenv("BUCKET_MONTHLY_SECONDS", "300")),
+        "15min": int(os.getenv("BUCKET_15MIN_SECONDS", "30")),
+        "1hour": int(os.getenv("BUCKET_1HOUR_SECONDS", "60")),
+        "4hour": int(os.getenv("BUCKET_4HOUR_SECONDS", "270")),
+        "hourly": int(os.getenv("BUCKET_HOURLY_SECONDS", "60")),
+        "daily": int(os.getenv("BUCKET_DAILY_SECONDS", "1440")),
+        "weekly": int(os.getenv("BUCKET_WEEKLY_SECONDS", "10080")),
+        "monthly": int(os.getenv("BUCKET_MONTHLY_SECONDS", "43200")),
     }
 
     health_app = build_health_app(health, dashboard)
@@ -207,7 +212,31 @@ async def main() -> None:
             api_passphrase=settings.clob_api_passphrase,
             rate_limiter_registry=shared_limiters,
         )
-        event_fetcher = EventFetcher(gamma=gamma, store=store, logger=logger)
+        def include_event(event: dict[str, Any]) -> bool:
+            return is_elon_tweet_event(event) or is_crypto_event(event)
+
+        def classify_event(event: dict[str, Any]) -> str | None:
+            if is_elon_tweet_event(event):
+                return classify_tweet_bucket(event)
+            if is_crypto_event(event):
+                return classify_crypto_bucket(event)
+            return None
+
+        def bucket_time_match(event: dict[str, Any], bucket: str) -> bool:
+            if is_elon_tweet_event(event):
+                return tweet_bucket_time_match(event, bucket)
+            if is_crypto_event(event):
+                return crypto_bucket_time_match(event, bucket)
+            return False
+
+        event_fetcher = EventFetcher(
+            gamma=gamma,
+            store=store,
+            logger=logger,
+            event_filter=include_event,
+            bucket_classifier=classify_event,
+            bucket_matcher=bucket_time_match,
+        )
 
         try:
             await clob.ensure_authenticated_session()
