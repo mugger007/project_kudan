@@ -8,7 +8,6 @@ from .rules.crypto_rules import (
     crypto_bucket_time_match,
     crypto_safety_check_live_price,
     crypto_safety_check,
-    fetch_binance_btc_price,
     is_crypto_event,
 )
 from .rules.tweet_rules import (
@@ -32,7 +31,6 @@ __all__ = [
     "is_crypto_event",
     "classify_crypto_bucket",
     "crypto_bucket_time_match",
-    "fetch_binance_btc_price",
     "crypto_safety_check",
     "crypto_safety_check_live_price",
     "TWEET_TAG_ID",

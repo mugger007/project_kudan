@@ -153,6 +153,10 @@ async def main() -> None:
                     newly_added = 0
                     updated_existing = 0
                     current_price_btc: float = price_feed.latest_price
+                    if current_price_btc > 0:
+                        logger.info("Discovery using BTC price: %.2f USDT", current_price_btc)
+                    else:
+                        logger.warning("BTC price feed not ready (latest_price=0); crypto safety checks will reject all crypto markets this cycle")
                     filtered_events: list[dict[str, str]] = []
                     seen_event_ids: set[str] = set()
 
