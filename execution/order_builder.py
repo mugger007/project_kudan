@@ -21,6 +21,7 @@ def build_order(
     size: float,
     strategy: str,
 ) -> OrderIntent:
+    """Constructs an OrderIntent with price and size rounded to 4dp — CLOB rejects more decimal places."""
     return OrderIntent(
         market_id=market_id,
         token_id=token_id,

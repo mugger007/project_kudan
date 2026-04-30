@@ -28,4 +28,5 @@ def minutes_remaining_for_event(event: dict[str, Any]) -> float:
     end_ts = parse_iso_utc(str(event.get("endDate") or ""))
     if end_ts is None:
         return 10_000.0
-    return max((end_ts - datetime.now(timezone.utc)).total_seconds() / 60.0, 0.0)
+    remaining = (end_ts - datetime.now(timezone.utc)).total_seconds() / 60.0
+    return float("inf") if remaining <= 0 else remaining

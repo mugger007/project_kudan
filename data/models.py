@@ -21,14 +21,17 @@ class MarketSnapshot:
 
     @property
     def seconds_to_resolution(self) -> float:
+        """Clamped to 0 so callers never see negative values for already-resolved markets."""
         return max((self.end_time - datetime.now(timezone.utc)).total_seconds(), 0.0)
 
     @property
     def implied_favorite_probability(self) -> float:
+        """Market-implied probability of the leading outcome (YES or NO)."""
         return max(self.best_yes_price, self.best_no_price)
 
     @property
     def favorite_side(self) -> str:
+        """YES wins ties — convention used by safety checks to determine bet direction."""
         return "YES" if self.best_yes_price >= self.best_no_price else "NO"
 
 
@@ -45,12 +48,15 @@ class OrderBookSnapshot:
     asks: list[OrderBookLevel]
 
     def best_bid(self) -> float:
+        """Returns 0.0 when book is empty — safe floor for price comparisons."""
         return self.bids[0].price if self.bids else 0.0
 
     def best_ask(self) -> float:
+        """Returns 1.0 when book is empty — worst-case ask, prevents false positives in safety checks."""
         return self.asks[0].price if self.asks else 1.0
 
     def cumulative_notional(self, side: str, limit_levels: int = 10) -> float:
+        """Estimates available depth in USD across top N levels; used by RiskManager to cap position size."""
         levels = self.asks if side.upper() == "BUY" else self.bids
         return sum(level.price * level.size for level in levels[:limit_levels])
 

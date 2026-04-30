@@ -17,7 +17,7 @@ Discovery loop (every DISCOVERY_POLL_SECONDS)
 Per-bucket polling tasks (one task per bucket, independent intervals)
   └─ Applies 99% probability threshold (configurable)
   └─ Tweet safety: rejects markets too close to tweet-count range boundaries
-  └─ Crypto safety: fetches live BTCUSDT from Binance, checks % distance to price boundary
+  └─ Crypto safety: fetches live BTCUSDT, checks % distance to price boundary
   └─ Liquidity + slippage guards via RiskManager
   └─ Pushes valid opportunities to asyncio.PriorityQueue (nearest resolution first)
 

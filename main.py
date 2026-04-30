@@ -151,7 +151,6 @@ async def main() -> None:
                     events = await event_fetcher.fetch_events()
                     discovered = 0
                     newly_added = 0
-                    updated_existing = 0
                     current_price_btc: float = price_feed.latest_price
                     if current_price_btc > 0:
                         logger.info("Discovery using BTC price: %.2f USDT", current_price_btc)
@@ -200,19 +199,7 @@ async def main() -> None:
                             raw_data=event,
                         )
 
-                        refreshed_current_price = item.current_price
-                        refreshed_tweet_count = item.tweetCount if event_type == "tweet" else None
-
                         if item.event_id in candidate_events:
-                            # Incremental refresh for existing entries: no full event pull.
-                            existing = candidate_events[item.event_id]
-                            existing["title"] = item.title or existing.get("title")
-                            existing["endDate"] = item.endDate or existing.get("endDate")
-                            existing["bucket"] = bucket
-                            existing["event_type"] = event_type
-                            existing["tweetCount"] = refreshed_tweet_count
-                            existing["current_price"] = refreshed_current_price
-                            updated_existing += 1
                             continue
 
                         # New events fetch full details once, then cache.
@@ -229,10 +216,9 @@ async def main() -> None:
                     health.heartbeat()
                     health.api_ok = True
                     logger.info(
-                        "Discovery cycle complete: discovered=%s new=%s refreshed=%s in_memory=%s",
+                        "Discovery cycle complete: discovered=%s new=%s in_memory=%s",
                         discovered,
                         newly_added,
-                        updated_existing,
                         len(candidate_events),
                     )
                 except Exception as exc:
@@ -277,11 +263,42 @@ async def main() -> None:
                         if str(event_data.get("bucket") or "") == bucket
                     ]
 
+                    # Prune expired candidates before processing.
+                    expired_ids = [
+                        eid for eid in bucket_event_ids
+                        if remaining_seconds(candidate_events[eid].get("endDate")) <= 0
+                    ]
+                    for eid in expired_ids:
+                        candidate_events.pop(eid, None)
+                        logger.info("Bucket=%s: expired event removed event_id=%s", bucket, eid)
+                    if expired_ids:
+                        bucket_event_ids = [eid for eid in bucket_event_ids if eid not in set(expired_ids)]
+
                     dashboard.scanned_markets += len(bucket_event_ids)
 
                     for event_id in bucket_event_ids:
                         if event_id not in candidate_events:
                             continue
+
+                        event_data = candidate_events[event_id]
+                        event_type = str(event_data.get("event_type") or "")
+
+                        if event_type == "crypto":
+                            new_price = price_feed.latest_price
+                            event_data["current_price"] = new_price
+                            logger.info(
+                                "Bucket=%s event_id=%s refreshed current_price=%.2f",
+                                bucket, event_id, new_price,
+                            )
+                        elif event_type == "tweet":
+                            fresh = await event_fetcher.refresh_event(event_id)
+                            if isinstance(fresh, dict) and fresh:
+                                new_count = fresh.get("tweetCount")
+                                event_data["tweetCount"] = new_count
+                                logger.info(
+                                    "Bucket=%s event_id=%s refreshed tweetCount=%s",
+                                    bucket, event_id, new_count,
+                                )
 
                         opportunity = await strategy.evaluate_event_opportunity(
                             event_id=event_id,

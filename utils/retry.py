@@ -13,6 +13,7 @@ async def async_retry(
     base_delay: float = 0.5,
     retry_on: tuple[type[BaseException], ...] = (Exception,),
 ) -> T:
+    """Retries an async callable with exponential backoff (delay doubles each attempt). Raises on final failure."""
     attempt = 0
     while True:
         try:
