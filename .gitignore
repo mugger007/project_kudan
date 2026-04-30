@@ -1,9 +1,30 @@
+# Python
 __pycache__/
 *.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+
+# Virtual environment
 .venv/
+
+# Secrets and local config
 .env
+
+# Database
 *.db
 *.db-wal
 *.db-shm
 *.sqlite3
+data/
+
+# Logs
 *.log
+logs/
+
+# Docs (internal — not for public repo)
+CLAUDE.md
+TESTING_LOCAL.md
+clawcloud-deployment.md

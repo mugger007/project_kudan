@@ -29,9 +29,8 @@ def is_elon_tweet_event(event: dict[str, Any]) -> bool:
         tags = event.get("tags") or []
         tag_ids = {str(tag.get("id")) for tag in tags if isinstance(tag, dict)}
         return (
-            ("elon-musk-of-tweets" in ticker or "elon musk # tweets" in title)
-            and TWEET_TAG_ID in tag_ids
-        )
+            "elon-musk-of-tweets" in ticker or "elon musk # tweets" in title
+        ) and TWEET_TAG_ID in tag_ids
     except Exception as exc:
         logger.error("is_elon_tweet_event failed: %s", exc)
         return False
@@ -44,21 +43,13 @@ def classify_tweet_bucket(event: dict[str, Any]) -> str:
 
         if TWEET_DAILY_RANGE_PATTERN.search(title):
             return "daily"
-
         if TWEET_MONTHLY_SPAN_PATTERN.search(title):
-            remaining = minutes_remaining_for_event(event)
-            return "weekly" if remaining <= 8 * 24 * 60 else "monthly"
-
-        remaining = minutes_remaining_for_event(event)
-        if remaining <= 36 * 60:
-            return "daily"
-        if remaining <= 8 * 24 * 60:
-            return "weekly"
-        return "monthly"
+            return "monthly"
 
     except Exception as exc:
         logger.error("classify_tweet_bucket failed: %s", exc)
-        return "monthly"
+        return False
+
 
 def tweet_bucket_time_match(event: dict[str, Any], bucket: str) -> bool:
     """Applies tweet-workflow timing rules for shortlist prefiltering."""
@@ -71,7 +62,10 @@ def tweet_bucket_time_match(event: dict[str, Any], bucket: str) -> bool:
         return remaining <= 24 * 60
     return False
 
-def tweet_safety_check(tweet_count: int, market: dict[str, Any], boundary_tolerance: int = 10) -> tuple[bool, int]:
+
+def tweet_safety_check(
+    tweet_count: int, market: dict[str, Any], boundary_tolerance: int = 10
+) -> tuple[bool, int]:
     """Rejects tweet range markets too close to boundaries and returns safety margin."""
     group_title = str(market.get("groupItemTitle") or market.get("question") or "")
     boundaries = extract_boundaries(group_title)

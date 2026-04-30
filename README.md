@@ -1,86 +1,120 @@
 # Project Kudan
 
-This repository is a production-ready starter for a free-tier, always-on Polymarket bot focused on:
+Async Python 3.12 trading bot for [Polymarket](https://polymarket.com/) prediction markets. Focuses on high-probability entries on Elon Musk tweet-count events and Bitcoin price events. Optimised for free-tier always-on deployment on [ClawCloud Run](https://run.claw.cloud).
 
-- High-Probability entries: event-driven tweet and crypto candidate workflows with bucket-aware checks.
+> **Status:** Dry-run mode is fully operational. Live order placement (CLOB signing) is not yet implemented — see [Future Work](#future-work).
 
-The stack is now optimized for ClawCloud Run deployment through App Launchpad using a container image.
+## Architecture
 
-## Core Features
+Kudan runs a 3-stage async pipeline with zero threads:
 
-- Pure asyncio 3-stage scheduler (discovery, per-bucket polling, execution consumer) with zero threads.
-- Priority-first opportunity execution using asyncio.PriorityQueue (shortest time-to-resolution first).
-- Incremental candidate refresh for low latency: full fetch only for new events, lightweight refresh for existing events.
-- Back-pressure guard: bucket polling auto-slows when queue depth exceeds threshold.
-- Circuit breaker: pauses scheduler after repeated failures and emits Telegram alert.
-- FastAPI health endpoint at /health with queue depth, candidate count, and circuit state.
-- SQLite persistence for scans/opportunities/trades plus candidate snapshot crash recovery.
+```
+Discovery loop (every DISCOVERY_POLL_SECONDS)
+  └─ Fetches tweet + crypto events from Polymarket Gamma API
+  └─ Classifies into buckets: 5min / 15min / hourly / 4hour / daily / weekly / monthly
+  └─ Incremental refresh: full fetch once per new event, lightweight refresh for existing
 
-## ClawCloud Setup
+Per-bucket polling tasks (one task per bucket, independent intervals)
+  └─ Applies 99% probability threshold (configurable)
+  └─ Tweet safety: rejects markets too close to tweet-count range boundaries
+  └─ Crypto safety: fetches live BTCUSDT from Binance, checks % distance to price boundary
+  └─ Liquidity + slippage guards via RiskManager
+  └─ Pushes valid opportunities to asyncio.PriorityQueue (nearest resolution first)
 
-1. Sign up at https://run.claw.cloud with GitHub login.
-2. Claim monthly free credit (typically around $5 with an eligible GitHub account).
-3. Push image to GitHub Container Registry:
+Execution consumer (single task)
+  └─ Dequeues in urgency order
+  └─ DRY_RUN=true → logs to SQLite, sends Telegram alert, no real order
+  └─ DRY_RUN=false → TODO (CLOB signed order placement not yet implemented)
+```
 
-   docker login ghcr.io
-   docker build -t ghcr.io/<your-user>/kudan:latest .
-   docker push ghcr.io/<your-user>/kudan:latest
+## Quick Start
 
-4. In App Launchpad, create a new app from image:
-   - Image: ghcr.io/<your-user>/kudan:latest
-   - Port: 8080
-   - Health path: /health
-   - Suggested resources: 1-2 vCPU, 2-4 GB RAM
+```bash
+cp .env.example .env
+# edit .env — minimum required: POLYMARKET_PRIVATE_KEY, POLYMARKET_WALLET_ADDRESS, POLYGON_RPC_PRIMARY
 
-5. Configure environment variables from .env.example in ClawCloud dashboard.
+# local run (Windows venv)
+.venv\Scripts\python.exe main.py
 
-6. Ensure persistent volume mount for /data if available so SQLite survives restarts.
+# health check
+curl http://127.0.0.1:8080/health
+```
 
-Detailed guide: see clawcloud-deployment.md.
+Set `DRY_RUN=true` in `.env` until live execution is validated.
 
-## High-Probability Discovery Workflow
+## Docker
 
-Kudan uses a latency-first 3-stage pipeline:
+```bash
+docker build -t kudan .
+docker run --env-file .env kudan
+```
 
-1. Discovery stage:
-   - Runs every DISCOVERY_POLL_SECONDS.
-   - Fetches relevant tweet and crypto events.
-   - Adds only new events with one-time full detail fetch.
-   - Refreshes existing candidates incrementally (tweetCount for tweet events, current_price for crypto events).
+Or with Compose (if `docker-compose.yml` present):
 
-2. Per-bucket polling stage:
-   - One long-running task per bucket (5min/15min/hourly/4hour/daily/weekly/monthly).
-   - Scans only matching in-memory candidates.
-   - Applies 99% threshold, liquidity/slippage checks, and tweet/crypto safety rules.
-   - Pushes valid opportunities to a PriorityQueue by remaining seconds to event end.
-
-3. Execution stage:
-   - Consumes opportunities in urgency order (nearest resolution first).
-   - Executes immediately and logs outcomes to SQLite.
-   - Sends Telegram alerts via execution pipeline.
-
-Candidate schema in SQLite candidate_events now supports mixed event types:
-
-- event_type: tweet or crypto
-- tweetCount: used for tweet events
-- current_price: used for crypto events
-
-## Local Docker Test
-
+```bash
 docker compose up -d --build
 docker compose logs -f kudan
-curl http://127.0.0.1:8080/health
+```
 
-## Security Notes
+## Health Endpoint
 
-- Never hardcode wallet keys.
-- Use a dedicated hot wallet with small funds.
-- Keep DRY_RUN=true until signed order execution is fully validated.
+`GET /health` returns:
 
-## Future TODOs
+```json
+{
+  "status": "ok",
+  "api_ok": true,
+  "rpc_ok": true,
+  "last_market_scan": "2026-04-30T12:00:00+00:00",
+  "candidate_count": 12,
+  "queue_depth": 0,
+  "circuit_open": false,
+  "recent_failures": 0,
+  "dashboard": {
+    "scanned_markets": 240,
+    "opportunities_found": 3,
+    "trades_sent": 0
+  }
+}
+```
 
-- Implement full Polymarket CLOB signing and order lifecycle management.
-- Add on-chain position reconciliation and live bankroll discovery.
-- Add AI-assisted probability models for signal confidence scoring.
+`status` is `"degraded"` when either `api_ok` or `rpc_ok` is false.
 
-In the oracle storms, Kudan stands watch and tempers edge into certainty.
+## Circuit Breaker
+
+After `CIRCUIT_BREAKER_THRESHOLD` failures within `CIRCUIT_BREAKER_WINDOW_SECONDS`, all polling tasks pause for `CIRCUIT_BREAKER_OPEN_SECONDS`. A Telegram alert fires on open. Defaults: 3 failures / 60s window / 60s pause.
+
+## SQLite Schema
+
+DB at `DB_PATH` (default `./kudan.db` locally, `/data/kudan.db` in container):
+
+| Table | Purpose |
+|-------|---------|
+| `candidate_events` | In-memory snapshot of shortlisted events (crash recovery) |
+| `filtered_events` | Pre-bucket-match classified event log |
+| `opportunities` | Every opportunity detected by strategy |
+| `trades` | Every order attempted (dry-run or live) |
+| `scan_log` | Raw market scan payloads |
+| `positions` | Open position tracking |
+
+## Supported Event Types
+
+| Type | Identifier | Data source |
+|------|-----------|-------------|
+| Elon tweet count | Tag ID `972`, ticker contains `elon-musk-of-tweets` | `tweetCount` from Gamma API |
+| Bitcoin price | Tag IDs `235` + `1312` | Live BTCUSDT from Binance public API |
+
+## RPC Failover
+
+`POLYGON_RPC_PRIMARY` + `POLYGON_RPC_FALLBACKS` (comma-separated) feed `RpcRotator`, which round-robins on failure. Free providers like `1rpc.io/matic` and `polygon-rpc.com` work as fallbacks.
+
+## Deployment
+
+See [clawcloud-deployment.md](clawcloud-deployment.md) for the ClawCloud Run guide.
+See [TESTING_LOCAL.md](TESTING_LOCAL.md) for local test instructions.
+
+## Future Work
+
+- Implement Polymarket CLOB signed order placement in `execution/trader.py`
+- On-chain position reconciliation and live bankroll discovery
+- AI-assisted probability confidence scoring
