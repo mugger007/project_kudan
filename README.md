@@ -102,7 +102,7 @@ DB at `DB_PATH` (default `./kudan.db` locally, `/data/kudan.db` in container):
 | Type | Identifier | Data source |
 |------|-----------|-------------|
 | Elon tweet count | Tag ID `972`, ticker contains `elon-musk-of-tweets` | `tweetCount` from Gamma API |
-| Bitcoin price | Tag IDs `235` + `1312` | Live BTCUSDT from Binance public API |
+| Bitcoin price | Tag IDs `235` + `1312` | Live BTCUSDT via Polymarket RTDS WebSocket (`wss://ws-live-data.polymarket.com`) |
 
 ## RPC Failover
 
