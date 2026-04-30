@@ -13,9 +13,7 @@ from config import load_settings
 from data import CandidateEvent, ClobClient, EventFetcher, GammaClient
 from data.auth import ClobAuthError
 from data.rate_limits import RateLimiterRegistry
-from data.rules.crypto_rules import (
-    fetch_binance_btc_price,
-)
+from data.price_feed import BtcPriceFeed
 from db import SqliteStore
 from execution import TradeExecutor
 from execution.execute_trade import execute_trade
@@ -90,6 +88,7 @@ async def main() -> None:
     )
     strategy = HighProbabilityStrategy(probability_threshold=settings.high_prob_threshold)
 
+    price_feed = BtcPriceFeed(logger)
     candidate_events: dict[str, dict[str, Any]] = await load_candidate_snapshot(store, bucket_intervals)
     opportunities_queue: asyncio.PriorityQueue[tuple[float, dict[str, Any]]] = asyncio.PriorityQueue()
     circuit_breaker = CircuitBreaker(
@@ -153,12 +152,9 @@ async def main() -> None:
                     discovered = 0
                     newly_added = 0
                     updated_existing = 0
-                    current_price_btc: float | None = None
+                    current_price_btc: float = price_feed.latest_price
                     filtered_events: list[dict[str, str]] = []
                     seen_event_ids: set[str] = set()
-
-                    with contextlib.suppress(Exception):
-                        current_price_btc = await fetch_binance_btc_price(session)
 
                     for event in events:
                         if not include_event(event):
@@ -289,7 +285,7 @@ async def main() -> None:
                             event_fetcher=event_fetcher,
                             clob=clob,
                             risk=risk,
-                            session=session,
+                            btc_price=price_feed.latest_price,
                             classify_event_bucket=classify_event_bucket,
                             event_type_for_event=event_type_for_event,
                         )
@@ -359,6 +355,7 @@ async def main() -> None:
         health_app = build_health_app(health, dashboard, candidate_events, opportunities_queue, circuit_breaker.state)
 
         tasks = [
+            asyncio.create_task(price_feed.run(stop_event), name="btc_price_feed"),
             asyncio.create_task(discovery_task(), name="discovery"),
             asyncio.create_task(execution_consumer_task(), name="execution_consumer"),
             asyncio.create_task(serve_health_api(health_app, health_host, health_port, logger, stop_event), name="health_api"),

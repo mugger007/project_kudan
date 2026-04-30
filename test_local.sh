@@ -21,7 +21,7 @@ echo
 echo "[2] Running import smoke test..."
 "$PYTHON" -c "
 import aiohttp, fastapi, uvicorn, web3
-import aiosqlite, python_telegram_bot
+import aiosqlite, telegram
 print('✓ All core imports successful')
 "
 
@@ -48,7 +48,7 @@ except Exception as e:
 
 echo
 echo "[4] Running syntax check on main modules..."
-"$PYTHON" -m py_compile main.py config/settings.py config/buckets.py data/models.py
+"$PYTHON" -m py_compile main.py config/settings.py data/models.py data/price_feed.py
 
 echo
 echo "[5] Test summary:"

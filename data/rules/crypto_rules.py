@@ -4,8 +4,6 @@ import logging
 import re
 from typing import Any
 
-import aiohttp
-
 from utils.time_utils import minutes_remaining_for_event
 from utils.crypto_parser import extract_market_boundary_spec, extract_market_price_boundaries
 from utils.tweet_parser import min_distance_to_boundaries
@@ -14,7 +12,6 @@ logger = logging.getLogger(__name__)
 
 BITCOIN_TAG_ID = "235"
 CRYPTO_PRICES_TAG_ID = "1312"
-BINANCE_BTCUSDT_TICKER_URL = "https://api.binance.com/api/v3/ticker/price"
 
 DAILY_TITLE_PATTERN = re.compile(
     r"(?:bitcoin\s+up\s+or\s+down\s+on\s+[a-z]+\s+\d{1,2}\?|"
@@ -136,26 +133,11 @@ def crypto_safety_check(
     return nearest_pct >= threshold, nearest_pct
 
 
-async def fetch_binance_btc_price(session: aiohttp.ClientSession) -> float:
-    """Fetches latest BTCUSDT price from Binance public API."""
-    params = {"symbol": "BTCUSDT"}
-    async with session.get(BINANCE_BTCUSDT_TICKER_URL, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-        resp.raise_for_status()
-        payload = await resp.json()
-    return float(payload.get("price") or 0.0)
-
-
-async def crypto_safety_check_live_price(
-    session: aiohttp.ClientSession,
+def crypto_safety_check_live_price(
+    current_price: float,
     market: dict[str, Any],
     bucket: str,
     event_title: str | None = None,
 ) -> tuple[bool, float]:
-    """Runs crypto safety check using live BTCUSDT price from Binance."""
-    try:
-        current_price = await fetch_binance_btc_price(session)
-    except Exception as exc:
-        logger.error("fetch_binance_btc_price failed: %s", exc)
-        return False, 0.0
-
+    """Runs crypto safety check using current price from BtcPriceFeed."""
     return crypto_safety_check(current_price=current_price, market=market, bucket=bucket, event_title=event_title)

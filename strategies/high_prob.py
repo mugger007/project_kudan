@@ -4,8 +4,6 @@ import json
 from collections.abc import Callable
 from typing import Any
 
-import aiohttp
-
 from data.clob_client import ClobClient
 from data.event_fetcher import EventFetcher
 from data.rules.crypto_rules import crypto_safety_check_live_price
@@ -45,7 +43,7 @@ class HighProbabilityStrategy:
         event_fetcher: EventFetcher,
         clob: ClobClient,
         risk: RiskManager,
-        session: aiohttp.ClientSession,
+        btc_price: float,
         classify_event_bucket: Callable[[dict[str, Any]], str | None],
         event_type_for_event: Callable[[dict[str, Any]], str | None],
     ) -> dict[str, Any] | None:
@@ -121,8 +119,8 @@ class HighProbabilityStrategy:
                     continue
                 safety_margin = float(margin)
             elif event_type_value == "crypto":
-                safe, margin = await crypto_safety_check_live_price(
-                    session,
+                safe, margin = crypto_safety_check_live_price(
+                    btc_price,
                     market,
                     "1hour" if event_bucket == "hourly" else event_bucket,
                     event_title=title,
